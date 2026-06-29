@@ -88,5 +88,8 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ password }),
     }),
+  exportProject: (id) => req(`/api/projects/${id}/export`),
+  importProject: (body) =>
+    req('/api/projects/import', { method: 'POST', body: JSON.stringify(body) }),
   version: () => req('/api/version'),
 }

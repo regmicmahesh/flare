@@ -127,9 +127,7 @@ async fn serve_slug_path(
 
 /// Shared protection gate for /p, /s, and custom domains.
 pub fn protection_denied(project: &Project, req: &Request<Body>) -> Option<Response> {
-    let Some(secret) = project.protect_secret.as_deref() else {
-        return None;
-    };
+    let secret = project.protect_secret.as_deref()?;
     let auth = req
         .headers()
         .get(header::AUTHORIZATION)
