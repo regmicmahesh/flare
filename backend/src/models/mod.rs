@@ -104,6 +104,17 @@ pub struct LogsResponse {
     pub logs: Vec<BuildLog>,
 }
 
+#[derive(Debug, Serialize)]
+pub struct SettingsResponse {
+    pub settings: std::collections::HashMap<String, String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateSettingsRequest {
+    /// Poll interval for public GitHub remotes (seconds, min 5).
+    pub poll_interval_secs: Option<u64>,
+}
+
 pub fn new_id() -> String {
     Uuid::new_v4().to_string()
 }

@@ -41,4 +41,7 @@ export const api = {
     }),
   deleteEnv: (id, key) =>
     req(`/api/projects/${id}/env/${encodeURIComponent(key)}`, { method: 'DELETE' }),
+  getSettings: () => req('/api/settings'),
+  updateSettings: (body) =>
+    req('/api/settings', { method: 'PATCH', body: JSON.stringify(body) }),
 }

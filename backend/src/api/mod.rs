@@ -2,6 +2,7 @@ mod deployments;
 mod env;
 mod health;
 mod projects;
+mod settings;
 
 use axum::Router;
 use std::sync::Arc;
@@ -13,5 +14,6 @@ pub fn routes(state: Arc<AppState>) -> Router {
         .merge(health::routes())
         .merge(projects::routes(state.clone()))
         .merge(deployments::routes(state.clone()))
-        .merge(env::routes(state))
+        .merge(env::routes(state.clone()))
+        .merge(settings::routes(state))
 }

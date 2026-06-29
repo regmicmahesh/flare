@@ -53,6 +53,7 @@
 }
 .muted { color: var(--muted); }
 .error-box { color: var(--red); background: rgba(248,113,113,.08); border: 1px solid #7f1d1d; padding: .75rem 1rem; border-radius: 8px; }
+.ok-box { color: var(--green); background: rgba(74,222,128,.08); border: 1px solid #14532d; padding: .75rem 1rem; border-radius: 8px; }
 .spacer { height: 1rem; }
 .pill {
   display: inline-block; padding: 0.12rem 0.45rem; border-radius: 6px;
