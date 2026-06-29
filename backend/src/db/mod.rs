@@ -5,7 +5,12 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use tokio::sync::mpsc;
 
-use crate::models::{BuildLog, Deployment, EnvVar, Project};
+use crate::models::{BuildLog, Deployment, DeploymentHits, EnvVar, Project};
+
+const PROJECT_COLS: &str = "id, name, slug, github_url, owner_repo, default_branch, framework,
+                    root_directory, build_command, output_directory, install_command,
+                    last_commit_sha, production_deployment_id, created_at, updated_at,
+                    poll_enabled != 0 as poll_enabled";
 
 pub struct AppState {
     pub pool: SqlitePool,
@@ -31,6 +36,7 @@ impl AppState {
             CREATE TABLE IF NOT EXISTS projects (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
+                slug TEXT NOT NULL DEFAULT '',
                 github_url TEXT NOT NULL,
                 owner_repo TEXT NOT NULL,
                 default_branch TEXT NOT NULL DEFAULT 'main',
@@ -40,6 +46,7 @@ impl AppState {
                 output_directory TEXT,
                 install_command TEXT,
                 last_commit_sha TEXT,
+                production_deployment_id TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 poll_enabled INTEGER NOT NULL DEFAULT 1
@@ -85,12 +92,76 @@ impl AppState {
                 value TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS deployment_hits (
+                deployment_id TEXT PRIMARY KEY,
+                hits INTEGER NOT NULL DEFAULT 0,
+                last_hit TEXT NOT NULL,
+                FOREIGN KEY(deployment_id) REFERENCES deployments(id) ON DELETE CASCADE
+            );
+
             CREATE INDEX IF NOT EXISTS idx_deployments_project ON deployments(project_id);
             CREATE INDEX IF NOT EXISTS idx_logs_deployment ON build_logs(deployment_id);
             "#,
         )
         .execute(&pool)
         .await?;
+
+        // Careful migrations for existing DBs.
+        for stmt in [
+            "ALTER TABLE projects ADD COLUMN slug TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE projects ADD COLUMN production_deployment_id TEXT",
+            "CREATE TABLE IF NOT EXISTS deployment_hits (
+                deployment_id TEXT PRIMARY KEY,
+                hits INTEGER NOT NULL DEFAULT 0,
+                last_hit TEXT NOT NULL,
+                FOREIGN KEY(deployment_id) REFERENCES deployments(id) ON DELETE CASCADE
+            )",
+        ] {
+            if let Err(e) = sqlx::query(stmt).execute(&pool).await {
+                let msg = e.to_string().to_lowercase();
+                if !msg.contains("duplicate column") && !msg.contains("already exists") {
+                    tracing::warn!("migration note for `{stmt}`: {e}");
+                }
+            }
+        }
+
+        let _ = sqlx::query(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_slug ON projects(slug) WHERE slug != ''",
+        )
+        .execute(&pool)
+        .await;
+
+        // Backfill empty slugs from name/id for pre-migration rows.
+        let rows: Vec<(String, String)> =
+            sqlx::query_as("SELECT id, name FROM projects WHERE slug IS NULL OR slug = ''")
+                .fetch_all(&pool)
+                .await
+                .unwrap_or_default();
+        for (id, name) in rows {
+            let base = crate::models::slugify(&name);
+            let mut slug = base.clone();
+            let mut n = 2u32;
+            loop {
+                let taken: Option<(String,)> =
+                    sqlx::query_as("SELECT id FROM projects WHERE slug = ? AND id != ?")
+                        .bind(&slug)
+                        .bind(&id)
+                        .fetch_optional(&pool)
+                        .await
+                        .ok()
+                        .flatten();
+                if taken.is_none() {
+                    break;
+                }
+                slug = format!("{base}-{n}");
+                n += 1;
+            }
+            let _ = sqlx::query("UPDATE projects SET slug = ? WHERE id = ?")
+                .bind(&slug)
+                .bind(&id)
+                .execute(&pool)
+                .await;
+        }
 
         // Seed defaults if missing
         sqlx::query(
@@ -153,39 +224,68 @@ impl AppState {
     }
 
     pub async fn list_projects(&self) -> sqlx::Result<Vec<Project>> {
-        sqlx::query_as::<_, Project>(
-            "SELECT id, name, github_url, owner_repo, default_branch, framework,
-                    root_directory, build_command, output_directory, install_command,
-                    last_commit_sha, created_at, updated_at,
-                    poll_enabled != 0 as poll_enabled
-             FROM projects ORDER BY updated_at DESC",
-        )
+        sqlx::query_as::<_, Project>(&format!(
+            "SELECT {PROJECT_COLS} FROM projects ORDER BY updated_at DESC"
+        ))
         .fetch_all(&self.pool)
         .await
     }
 
     pub async fn get_project(&self, id: &str) -> sqlx::Result<Option<Project>> {
-        sqlx::query_as::<_, Project>(
-            "SELECT id, name, github_url, owner_repo, default_branch, framework,
-                    root_directory, build_command, output_directory, install_command,
-                    last_commit_sha, created_at, updated_at,
-                    poll_enabled != 0 as poll_enabled
-             FROM projects WHERE id = ?",
-        )
-        .bind(id)
+        sqlx::query_as::<_, Project>(&format!("SELECT {PROJECT_COLS} FROM projects WHERE id = ?"))
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+    }
+
+    pub async fn get_project_by_slug(&self, slug: &str) -> sqlx::Result<Option<Project>> {
+        sqlx::query_as::<_, Project>(&format!(
+            "SELECT {PROJECT_COLS} FROM projects WHERE slug = ?"
+        ))
+        .bind(slug)
         .fetch_optional(&self.pool)
         .await
     }
 
+    /// Allocate a unique slug based on `base` (from name). Optionally exclude a project id.
+    pub async fn allocate_slug(
+        &self,
+        base: &str,
+        exclude_id: Option<&str>,
+    ) -> sqlx::Result<String> {
+        let mut slug = base.to_string();
+        let mut n = 2u32;
+        loop {
+            let existing = if let Some(eid) = exclude_id {
+                sqlx::query_as::<_, (String,)>("SELECT id FROM projects WHERE slug = ? AND id != ?")
+                    .bind(&slug)
+                    .bind(eid)
+                    .fetch_optional(&self.pool)
+                    .await?
+            } else {
+                sqlx::query_as::<_, (String,)>("SELECT id FROM projects WHERE slug = ?")
+                    .bind(&slug)
+                    .fetch_optional(&self.pool)
+                    .await?
+            };
+            if existing.is_none() {
+                return Ok(slug);
+            }
+            slug = format!("{base}-{n}");
+            n += 1;
+        }
+    }
+
     pub async fn insert_project(&self, p: &Project) -> sqlx::Result<()> {
         sqlx::query(
-            "INSERT INTO projects (id, name, github_url, owner_repo, default_branch, framework,
+            "INSERT INTO projects (id, name, slug, github_url, owner_repo, default_branch, framework,
              root_directory, build_command, output_directory, install_command, last_commit_sha,
-             created_at, updated_at, poll_enabled)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             production_deployment_id, created_at, updated_at, poll_enabled)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&p.id)
         .bind(&p.name)
+        .bind(&p.slug)
         .bind(&p.github_url)
         .bind(&p.owner_repo)
         .bind(&p.default_branch)
@@ -195,6 +295,7 @@ impl AppState {
         .bind(&p.output_directory)
         .bind(&p.install_command)
         .bind(&p.last_commit_sha)
+        .bind(&p.production_deployment_id)
         .bind(p.created_at)
         .bind(p.updated_at)
         .bind(p.poll_enabled)
@@ -205,11 +306,12 @@ impl AppState {
 
     pub async fn update_project(&self, p: &Project) -> sqlx::Result<()> {
         sqlx::query(
-            "UPDATE projects SET name=?, default_branch=?, framework=?, root_directory=?,
+            "UPDATE projects SET name=?, slug=?, default_branch=?, framework=?, root_directory=?,
              build_command=?, output_directory=?, install_command=?, last_commit_sha=?,
-             updated_at=?, poll_enabled=? WHERE id=?",
+             production_deployment_id=?, updated_at=?, poll_enabled=? WHERE id=?",
         )
         .bind(&p.name)
+        .bind(&p.slug)
         .bind(&p.default_branch)
         .bind(&p.framework)
         .bind(&p.root_directory)
@@ -217,6 +319,7 @@ impl AppState {
         .bind(&p.output_directory)
         .bind(&p.install_command)
         .bind(&p.last_commit_sha)
+        .bind(&p.production_deployment_id)
         .bind(p.updated_at)
         .bind(p.poll_enabled)
         .bind(&p.id)
@@ -290,6 +393,91 @@ impl AppState {
         .await
     }
 
+    /// Latest READY deployment for a project, if any.
+    pub async fn latest_ready_deployment(
+        &self,
+        project_id: &str,
+    ) -> sqlx::Result<Option<Deployment>> {
+        sqlx::query_as::<_, Deployment>(
+            "SELECT * FROM deployments WHERE project_id = ? AND status = 'ready'
+             ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(project_id)
+        .fetch_optional(&self.pool)
+        .await
+    }
+
+    /// Ready deployments newest-first.
+    pub async fn list_ready_deployments(&self, project_id: &str) -> sqlx::Result<Vec<Deployment>> {
+        sqlx::query_as::<_, Deployment>(
+            "SELECT * FROM deployments WHERE project_id = ? AND status = 'ready'
+             ORDER BY created_at DESC LIMIT 50",
+        )
+        .bind(project_id)
+        .fetch_all(&self.pool)
+        .await
+    }
+
+    /// Resolve the deployment served at production aliases: prefer production_deployment_id
+    /// when set and READY, otherwise the latest READY deployment.
+    pub async fn resolve_alias_deployment(
+        &self,
+        project: &Project,
+    ) -> sqlx::Result<Option<Deployment>> {
+        if let Some(pid) = &project.production_deployment_id {
+            if let Some(d) = self.get_deployment(pid).await? {
+                if d.status == "ready" && d.project_id == project.id {
+                    return Ok(Some(d));
+                }
+            }
+        }
+        self.latest_ready_deployment(&project.id).await
+    }
+
+    /// Increment hit counter for a deployment (lightweight analytics).
+    pub async fn record_hit(&self, deployment_id: &str) -> sqlx::Result<()> {
+        let now = Utc::now();
+        sqlx::query(
+            "INSERT INTO deployment_hits (deployment_id, hits, last_hit) VALUES (?, 1, ?)
+             ON CONFLICT(deployment_id) DO UPDATE SET
+               hits = hits + 1,
+               last_hit = excluded.last_hit",
+        )
+        .bind(deployment_id)
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn get_deployment_hits(
+        &self,
+        deployment_id: &str,
+    ) -> sqlx::Result<Option<DeploymentHits>> {
+        sqlx::query_as::<_, DeploymentHits>(
+            "SELECT deployment_id, hits, last_hit FROM deployment_hits WHERE deployment_id = ?",
+        )
+        .bind(deployment_id)
+        .fetch_optional(&self.pool)
+        .await
+    }
+
+    pub async fn list_hits_for_project(
+        &self,
+        project_id: &str,
+    ) -> sqlx::Result<Vec<DeploymentHits>> {
+        sqlx::query_as::<_, DeploymentHits>(
+            "SELECT h.deployment_id, h.hits, h.last_hit
+             FROM deployment_hits h
+             INNER JOIN deployments d ON d.id = h.deployment_id
+             WHERE d.project_id = ?
+             ORDER BY h.hits DESC",
+        )
+        .bind(project_id)
+        .fetch_all(&self.pool)
+        .await
+    }
+
     pub async fn append_log(&self, deployment_id: &str, line: &str) -> sqlx::Result<()> {
         sqlx::query("INSERT INTO build_logs (deployment_id, line, created_at) VALUES (?, ?, ?)")
             .bind(deployment_id)
@@ -345,13 +533,9 @@ impl AppState {
     }
 
     pub async fn list_pollable_projects(&self) -> sqlx::Result<Vec<Project>> {
-        sqlx::query_as::<_, Project>(
-            "SELECT id, name, github_url, owner_repo, default_branch, framework,
-                    root_directory, build_command, output_directory, install_command,
-                    last_commit_sha, created_at, updated_at,
-                    poll_enabled != 0 as poll_enabled
-             FROM projects WHERE poll_enabled != 0",
-        )
+        sqlx::query_as::<_, Project>(&format!(
+            "SELECT {PROJECT_COLS} FROM projects WHERE poll_enabled != 0"
+        ))
         .fetch_all(&self.pool)
         .await
     }

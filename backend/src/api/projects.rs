@@ -10,8 +10,10 @@ use std::sync::Arc;
 
 use crate::db::AppState;
 use crate::models::{
-    new_id, ActivityEntry, ActivityResponse, CommitEntry, CommitsResponse, CreateProjectRequest,
-    DeployRequest, Deployment, Project, ProjectListResponse, UpdateProjectRequest,
+    new_id, slugify, ActivityEntry, ActivityResponse, CommitEntry, CommitsResponse,
+    CreateProjectRequest, DeployRequest, Deployment, DeploymentStatsResponse, Project,
+    ProjectListResponse, ProjectStatsResponse, PromoteRequest, RollbackRequest,
+    UpdateProjectRequest,
 };
 use crate::services::framework::detect_framework;
 use crate::services::git::{
@@ -28,6 +30,9 @@ pub fn routes(state: Arc<AppState>) -> Router {
                 .delete(delete_project),
         )
         .route("/api/projects/{id}/deploy", post(trigger_deploy))
+        .route("/api/projects/{id}/promote", post(promote_deployment))
+        .route("/api/projects/{id}/rollback", post(rollback_deployment))
+        .route("/api/projects/{id}/stats", get(project_stats))
         .route("/api/projects/{id}/commits", get(list_project_commits))
         .route("/api/projects/{id}/activity", get(project_activity))
         .with_state(state)
@@ -71,6 +76,10 @@ async fn create_project(
     let name = body.name.clone().unwrap_or_else(|| parsed.repo.clone());
     let now = Utc::now();
     let id = new_id();
+    let slug = state
+        .allocate_slug(&slugify(&name), None)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     let repo_path = state.data_dir.join("repos").join(&id);
     clone_or_fetch(&parsed.clone_url, &repo_path, &branch)
@@ -88,6 +97,7 @@ async fn create_project(
     let mut project = Project {
         id: id.clone(),
         name,
+        slug,
         github_url: parsed.html_url.clone(),
         owner_repo: format!("{}/{}", parsed.owner, parsed.repo),
         default_branch: branch.clone(),
@@ -97,6 +107,7 @@ async fn create_project(
         output_directory: body.output_directory.or(fw.output_directory.clone()),
         install_command: body.install_command.or(fw.install_command.clone()),
         last_commit_sha: None,
+        production_deployment_id: None,
         created_at: now,
         updated_at: now,
         poll_enabled: true,
@@ -274,6 +285,136 @@ async fn trigger_deploy(
         state.enqueue_build(dep_id);
     }
     Ok(Json(dep))
+}
+
+/// Pin a ready deployment as production (served at /p/{id} and /s/{slug}).
+async fn promote_deployment(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(body): Json<PromoteRequest>,
+) -> Result<Json<Project>, (StatusCode, String)> {
+    set_production(&state, &id, &body.deployment_id).await
+}
+
+/// Instant rollback: promote previous ready deployment, or an explicit deployment_id.
+async fn rollback_deployment(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    body: Result<Json<RollbackRequest>, axum::extract::rejection::JsonRejection>,
+) -> Result<Json<Project>, (StatusCode, String)> {
+    let req = body.map(|Json(b)| b).unwrap_or_default();
+
+    let target_id = if let Some(dep_id) = req.deployment_id.filter(|s| !s.is_empty()) {
+        dep_id
+    } else {
+        let project = state
+            .get_project(&id)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+            .ok_or((StatusCode::NOT_FOUND, "project not found".into()))?;
+
+        let ready = state
+            .list_ready_deployments(&id)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+        if ready.is_empty() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "no ready deployments to roll back to".into(),
+            ));
+        }
+
+        // Prefer the ready deployment immediately older than current production;
+        // if production is unset or missing, use the second-latest ready (or latest if only one?).
+        let current = project.production_deployment_id.as_deref();
+        let target = if let Some(cur) = current {
+            ready.iter().find(|d| d.id != cur).or_else(|| ready.first())
+        } else if ready.len() >= 2 {
+            // No pin: treat latest as "current" and roll back to previous.
+            ready.get(1)
+        } else {
+            ready.first()
+        };
+
+        target.map(|d| d.id.clone()).ok_or((
+            StatusCode::BAD_REQUEST,
+            "no previous ready deployment".into(),
+        ))?
+    };
+
+    set_production(&state, &id, &target_id).await
+}
+
+async fn set_production(
+    state: &AppState,
+    project_id: &str,
+    deployment_id: &str,
+) -> Result<Json<Project>, (StatusCode, String)> {
+    let mut project = state
+        .get_project(project_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((StatusCode::NOT_FOUND, "project not found".into()))?;
+
+    let dep = state
+        .get_deployment(deployment_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((StatusCode::NOT_FOUND, "deployment not found".into()))?;
+
+    if dep.project_id != project_id {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "deployment does not belong to this project".into(),
+        ));
+    }
+    if dep.status != "ready" {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "only ready deployments can be promoted".into(),
+        ));
+    }
+
+    project.production_deployment_id = Some(dep.id);
+    project.updated_at = Utc::now();
+    state
+        .update_project(&project)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(project))
+}
+
+async fn project_stats(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<ProjectStatsResponse>, (StatusCode, String)> {
+    let _project = state
+        .get_project(&id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((StatusCode::NOT_FOUND, "project not found".into()))?;
+
+    let rows = state
+        .list_hits_for_project(&id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let deployments: Vec<DeploymentStatsResponse> = rows
+        .into_iter()
+        .map(|h| DeploymentStatsResponse {
+            deployment_id: h.deployment_id,
+            hits: h.hits,
+            last_hit: Some(h.last_hit),
+        })
+        .collect();
+    let hits: i64 = deployments.iter().map(|d| d.hits).sum();
+
+    Ok(Json(ProjectStatsResponse {
+        project_id: id,
+        hits,
+        deployments,
+    }))
 }
 
 async fn list_project_commits(

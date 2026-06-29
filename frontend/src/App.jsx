@@ -1,5 +1,5 @@
 import { NavLink, Route, Routes, Link, useNavigate, useParams } from 'react-router-dom'
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { api } from './api'
 import './App.css'
 
@@ -82,6 +82,7 @@ function ProjectsPage() {
               <div className="row" style={{ marginTop: '0.65rem' }}>
                 {p.framework && <span className="pill">{p.framework}</span>}
                 <span className="pill">{p.default_branch}</span>
+                {p.slug && <span className="pill">/s/{p.slug}</span>}
                 {p.poll_enabled && <span className="pill">auto-deploy</span>}
               </div>
             </article>
@@ -154,12 +155,48 @@ function NewProjectPage() {
   )
 }
 
+function HitsBar({ stats }) {
+  const items = useMemo(() => {
+    const list = stats?.deployments || []
+    const max = Math.max(1, ...list.map((d) => d.hits || 0))
+    return list.slice(0, 8).map((d) => ({
+      id: d.deployment_id,
+      hits: d.hits || 0,
+      pct: Math.round(((d.hits || 0) / max) * 100),
+    }))
+  }, [stats])
+
+  if (!stats) return null
+
+  return (
+    <div className="card" style={{ marginTop: '0.75rem' }}>
+      <div className="row" style={{ justifyContent: 'space-between' }}>
+        <strong>Request analytics</strong>
+        <span className="pill">{stats.hits || 0} total hits</span>
+      </div>
+      {!items.length && <p className="muted" style={{ margin: '0.5rem 0 0' }}>No hits recorded yet. Open a preview URL.</p>}
+      <div className="hit-bars" style={{ marginTop: '0.65rem' }}>
+        {items.map((it) => (
+          <div key={it.id} className="hit-row">
+            <code className="hit-label">{it.id.slice(0, 8)}</code>
+            <div className="hit-track">
+              <div className="hit-fill" style={{ width: `${it.pct}%` }} />
+            </div>
+            <span className="hit-count">{it.hits}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 function ProjectDetailPage() {
   const { id } = useParams()
   const nav = useNavigate()
   const [project, setProject] = useState(null)
   const [deployments, setDeployments] = useState([])
   const [commits, setCommits] = useState([])
+  const [stats, setStats] = useState(null)
   const [env, setEnv] = useState([])
   const [ek, setEk] = useState('')
   const [ev, setEv] = useState('')
@@ -167,19 +204,29 @@ function ProjectDetailPage() {
   const [logsFor, setLogsFor] = useState(null)
   const [logs, setLogs] = useState([])
   const [deployingSha, setDeployingSha] = useState(null)
+  const [rollingBack, setRollingBack] = useState(false)
+  const [diffText, setDiffText] = useState('')
+
+  const hitsByDep = useMemo(() => {
+    const m = {}
+    for (const d of stats?.deployments || []) m[d.deployment_id] = d.hits
+    return m
+  }, [stats])
 
   const load = useCallback(async () => {
     try {
-      const [p, d, e, c] = await Promise.all([
+      const [p, d, e, c, s] = await Promise.all([
         api.getProject(id),
         api.listDeployments(id),
         api.listEnv(id),
         api.listCommits(id, 20).catch(() => ({ commits: [] })),
+        api.projectStats(id).catch(() => null),
       ])
       setProject(p)
       setDeployments(d.deployments || [])
       setEnv(e.env || [])
       setCommits(c.commits || [])
+      setStats(s)
       setErr('')
     } catch (ex) {
       setErr(ex.message)
@@ -223,6 +270,18 @@ function ProjectDetailPage() {
     }
   }
 
+  async function doRollback(deploymentId) {
+    try {
+      setRollingBack(true)
+      await api.rollback(id, deploymentId)
+      await load()
+    } catch (ex) {
+      setErr(ex.message)
+    } finally {
+      setRollingBack(false)
+    }
+  }
+
   async function remove() {
     if (!window.confirm('Delete this project?')) return
     await api.deleteProject(id)
@@ -237,6 +296,19 @@ function ProjectDetailPage() {
     load()
   }
 
+  async function showDiff(a, b) {
+    try {
+      const data = await api.deploymentDiff(a, b)
+      const files = data.files || []
+      setDiffText(
+        `Diff ${data.commit_sha_a?.slice(0, 7)} → ${data.commit_sha_b?.slice(0, 7)}\n` +
+          (files.length ? files.join('\n') : '(no changed files)'),
+      )
+    } catch (ex) {
+      setErr(ex.message)
+    }
+  }
+
   if (!project && !err) {
     return (
       <Shell>
@@ -244,6 +316,8 @@ function ProjectDetailPage() {
       </Shell>
     )
   }
+
+  const readyCount = deployments.filter((d) => d.status === 'ready').length
 
   return (
     <Shell>
@@ -261,6 +335,28 @@ function ProjectDetailPage() {
                 <> · root <code>{project.root_directory}</code></>
               )}
             </p>
+            {(project.slug || project.id) && (
+              <p className="muted" style={{ marginTop: '0.35rem' }}>
+                Production:{' '}
+                {project.slug && (
+                  <>
+                    <a href={`/s/${project.slug}/`} target="_blank" rel="noreferrer">
+                      /s/{project.slug}/
+                    </a>
+                    {' · '}
+                  </>
+                )}
+                <a href={`/p/${project.id}/`} target="_blank" rel="noreferrer">
+                  /p/{project.id}/
+                </a>
+                {project.production_deployment_id && (
+                  <>
+                    {' · '}
+                    pinned <code>{project.production_deployment_id.slice(0, 8)}</code>
+                  </>
+                )}
+              </p>
+            )}
             <div className="row">
               <button
                 className="primary"
@@ -270,9 +366,19 @@ function ProjectDetailPage() {
               >
                 {deployingSha === 'head' ? 'Deploying…' : 'Deploy now'}
               </button>
+              <button
+                type="button"
+                onClick={() => doRollback()}
+                disabled={rollingBack || readyCount < 1}
+                title="Promote previous ready deployment to production"
+              >
+                {rollingBack ? 'Rolling back…' : 'Instant rollback'}
+              </button>
               <button type="button" className="danger" onClick={remove}>Delete</button>
             </div>
           </div>
+
+          <HitsBar stats={stats} />
 
           <h2 style={{ fontSize: '1.1rem', marginTop: '1.5rem' }}>Recent commits</h2>
           <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
@@ -321,21 +427,26 @@ function ProjectDetailPage() {
                   <th>Status</th>
                   <th>Commit</th>
                   <th>Message</th>
+                  <th>Hits</th>
                   <th>Changed files</th>
                   <th>Preview</th>
                   <th />
                 </tr>
               </thead>
               <tbody>
-                {deployments.map((d) => (
+                {deployments.map((d, idx) => (
                   <tr key={d.id}>
                     <td>
                       <span className={`status ${statusClass(d.status)}`} title={d.error_message || ''}>
                         {d.status}
                       </span>
+                      {project.production_deployment_id === d.id && (
+                        <span className="pill" style={{ marginLeft: 6 }}>production</span>
+                      )}
                     </td>
                     <td><code>{d.commit_sha?.slice(0, 7)}</code></td>
                     <td className="muted">{d.commit_message || '—'}</td>
+                    <td className="muted">{hitsByDep[d.id] ?? 0}</td>
                     <td className="muted" style={{ maxWidth: 180, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                       {d.changed_files ? d.changed_files.split('\n').length + ' files' : '—'}
                     </td>
@@ -345,16 +456,61 @@ function ProjectDetailPage() {
                       ) : '—'}
                     </td>
                     <td>
-                      <button type="button" onClick={() => setLogsFor(d.id)}>Logs</button>
+                      <div className="row" style={{ gap: 6 }}>
+                        <button type="button" onClick={() => setLogsFor(d.id)}>Logs</button>
+                        {d.status === 'ready' && project.production_deployment_id !== d.id && (
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              try {
+                                await api.promote(id, d.id)
+                                await load()
+                              } catch (ex) {
+                                setErr(ex.message)
+                              }
+                            }}
+                          >
+                            Promote
+                          </button>
+                        )}
+                        {d.status === 'ready' && project.production_deployment_id !== d.id && (
+                          <button
+                            type="button"
+                            disabled={rollingBack}
+                            onClick={() => doRollback(d.id)}
+                          >
+                            Rollback here
+                          </button>
+                        )}
+                        {idx > 0 && deployments[idx - 1] && (
+                          <button
+                            type="button"
+                            onClick={() => showDiff(deployments[idx - 1].id, d.id)}
+                            title="Compare with newer deployment"
+                          >
+                            Diff↑
+                          </button>
+                        )}
+                      </div>
                     </td>
                   </tr>
                 ))}
                 {!deployments.length && (
-                  <tr><td colSpan={6} className="muted">No deployments yet</td></tr>
+                  <tr><td colSpan={7} className="muted">No deployments yet</td></tr>
                 )}
               </tbody>
             </table>
           </div>
+
+          {diffText && (
+            <>
+              <div className="row" style={{ marginTop: '1rem' }}>
+                <h2 style={{ fontSize: '1.1rem', margin: 0 }}>Deployment diff</h2>
+                <button type="button" onClick={() => setDiffText('')}>Close</button>
+              </div>
+              <div className="logs">{diffText}</div>
+            </>
+          )}
 
           {logsFor && (
             <>

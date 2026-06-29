@@ -3,6 +3,7 @@ mod env;
 mod health;
 mod projects;
 mod settings;
+pub mod static_serve;
 
 use axum::Router;
 use std::sync::Arc;
@@ -15,5 +16,6 @@ pub fn routes(state: Arc<AppState>) -> Router {
         .merge(projects::routes(state.clone()))
         .merge(deployments::routes(state.clone()))
         .merge(env::routes(state.clone()))
-        .merge(settings::routes(state))
+        .merge(settings::routes(state.clone()))
+        .merge(static_serve::routes(state))
 }

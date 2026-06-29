@@ -3,16 +3,16 @@ mod db;
 mod models;
 mod services;
 
-use axum::Router;
+use axum::{middleware, Router};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
-use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use crate::db::AppState;
+use crate::services::analytics::track_requests;
 use crate::services::poller::start_poller;
 use crate::services::worker::BuildWorker;
 
@@ -46,11 +46,12 @@ async fn main() -> anyhow::Result<()> {
         .allow_methods(Any)
         .allow_headers(Any);
 
-    let static_deploy = ServeDir::new(data_dir.join("deployments"));
-
     let app = Router::new()
         .merge(api::routes(state.clone()))
-        .nest_service("/_deploy", static_deploy)
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            track_requests,
+        ))
         .layer(cors)
         .layer(TraceLayer::new_for_http());
 
