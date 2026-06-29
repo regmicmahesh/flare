@@ -87,6 +87,12 @@ impl AppState {
                 FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
             );
 
+            CREATE TABLE IF NOT EXISTS deployment_hits (
+                deployment_id TEXT PRIMARY KEY,
+                hits INTEGER NOT NULL DEFAULT 0,
+                last_hit TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS settings (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
@@ -561,6 +567,47 @@ impl AppState {
         )
         .bind(host)
         .fetch_optional(&self.pool)
+        .await
+    }
+
+    pub async fn record_hit(&self, deployment_id: &str) -> sqlx::Result<()> {
+        let now = Utc::now();
+        sqlx::query(
+            "INSERT INTO deployment_hits (deployment_id, hits, last_hit) VALUES (?, 1, ?)
+             ON CONFLICT(deployment_id) DO UPDATE SET hits = hits + 1, last_hit = excluded.last_hit",
+        )
+        .bind(deployment_id)
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn get_deployment_hits(
+        &self,
+        deployment_id: &str,
+    ) -> sqlx::Result<Option<(i64, chrono::DateTime<Utc>)>> {
+        sqlx::query_as::<_, (i64, chrono::DateTime<Utc>)>(
+            "SELECT hits, last_hit FROM deployment_hits WHERE deployment_id = ?",
+        )
+        .bind(deployment_id)
+        .fetch_optional(&self.pool)
+        .await
+    }
+
+    pub async fn list_project_hits(
+        &self,
+        project_id: &str,
+    ) -> sqlx::Result<Vec<(String, i64, chrono::DateTime<Utc>)>> {
+        sqlx::query_as::<_, (String, i64, chrono::DateTime<Utc>)>(
+            "SELECT h.deployment_id, h.hits, h.last_hit
+             FROM deployment_hits h
+             INNER JOIN deployments d ON d.id = h.deployment_id
+             WHERE d.project_id = ?
+             ORDER BY h.hits DESC",
+        )
+        .bind(project_id)
+        .fetch_all(&self.pool)
         .await
     }
 

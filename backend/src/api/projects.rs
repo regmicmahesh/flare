@@ -11,7 +11,8 @@ use std::sync::Arc;
 use crate::db::AppState;
 use crate::models::{
     new_id, slugify, ActivityEntry, ActivityResponse, CommitEntry, CommitsResponse,
-    CreateProjectRequest, DeployRequest, Deployment, Project, ProjectListResponse, PromoteRequest,
+    CreateProjectRequest, DeployRequest, Deployment, DeploymentHitRow, Project,
+    ProjectListResponse, ProjectStatsResponse, PromoteRequest, RollbackRequest,
     UpdateProjectRequest,
 };
 use crate::services::framework::detect_framework;
@@ -30,6 +31,8 @@ pub fn routes() -> Router<Arc<AppState>> {
         )
         .route("/api/projects/{id}/deploy", post(trigger_deploy))
         .route("/api/projects/{id}/promote", post(promote_deployment))
+        .route("/api/projects/{id}/rollback", post(rollback_deployment))
+        .route("/api/projects/{id}/stats", get(project_stats))
         .route("/api/projects/{id}/commits", get(list_project_commits))
         .route("/api/projects/{id}/activity", get(project_activity))
 }
@@ -396,4 +399,101 @@ async fn project_activity(
         .collect();
 
     Ok(Json(ActivityResponse { activity }))
+}
+
+async fn rollback_deployment(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    body: Option<Json<RollbackRequest>>,
+) -> Result<Json<Project>, (StatusCode, String)> {
+    let body = body.map(|j| j.0).unwrap_or_default();
+    let mut project = state
+        .get_project(&id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((StatusCode::NOT_FOUND, "project not found".into()))?;
+
+    let target_id = if let Some(did) = body.deployment_id {
+        did
+    } else {
+        let deps = state
+            .list_deployments(&id)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        let ready: Vec<_> = deps.into_iter().filter(|d| d.status == "ready").collect();
+        if let Some(prod) = &project.production_deployment_id {
+            ready
+                .iter()
+                .find(|d| &d.id != prod)
+                .map(|d| d.id.clone())
+                .ok_or((
+                    StatusCode::BAD_REQUEST,
+                    "no previous ready deployment to roll back to".into(),
+                ))?
+        } else if ready.len() >= 2 {
+            ready[1].id.clone()
+        } else {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "need at least two ready deployments to roll back".into(),
+            ));
+        }
+    };
+
+    let dep = state
+        .get_deployment(&target_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((StatusCode::NOT_FOUND, "deployment not found".into()))?;
+    if dep.project_id != id {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "deployment does not belong to this project".into(),
+        ));
+    }
+    if dep.status != "ready" {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "only ready deployments can be rolled back to".into(),
+        ));
+    }
+
+    project.production_deployment_id = Some(dep.id);
+    project.updated_at = Utc::now();
+    state
+        .update_project(&project)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(project))
+}
+
+async fn project_stats(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<ProjectStatsResponse>, (StatusCode, String)> {
+    let _ = state
+        .get_project(&id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((StatusCode::NOT_FOUND, "project not found".into()))?;
+
+    let rows = state
+        .list_project_hits(&id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let total_hits = rows.iter().map(|r| r.1).sum();
+    let deployments = rows
+        .into_iter()
+        .map(|(deployment_id, hits, last_hit)| DeploymentHitRow {
+            deployment_id,
+            hits,
+            last_hit,
+        })
+        .collect();
+
+    Ok(Json(ProjectStatsResponse {
+        project_id: id,
+        total_hits,
+        deployments,
+    }))
 }
