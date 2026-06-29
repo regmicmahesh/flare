@@ -337,6 +337,19 @@ function ProjectDetailPage() {
               >
                 {deployingSha === 'head' ? 'Deploying…' : 'Deploy now'}
               </button>
+              <button
+                type="button"
+                onClick={async () => {
+                  try {
+                    await api.rollback(id)
+                    await load()
+                  } catch (ex) {
+                    setErr(ex.message)
+                  }
+                }}
+              >
+                Instant rollback
+              </button>
               <button type="button" className="danger" onClick={remove}>Delete</button>
             </div>
           </div>

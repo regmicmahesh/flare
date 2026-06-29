@@ -199,6 +199,42 @@ pub struct DomainListResponse {
 /// Known deploy-hook event names.
 pub const WEBHOOK_EVENTS: &[&str] = &["deployment.ready", "deployment.error", "deployment.queued"];
 
+#[derive(Debug, Serialize)]
+pub struct DeploymentStatsResponse {
+    pub deployment_id: String,
+    pub hits: i64,
+    pub last_hit: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DeploymentHitRow {
+    pub deployment_id: String,
+    pub hits: i64,
+    pub last_hit: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ProjectStatsResponse {
+    pub project_id: String,
+    pub total_hits: i64,
+    pub deployments: Vec<DeploymentHitRow>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DeploymentDiffResponse {
+    pub a: String,
+    pub b: String,
+    pub commit_sha_a: String,
+    pub commit_sha_b: String,
+    pub files: Vec<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct RollbackRequest {
+    /// Optional explicit deployment to roll back to (must be ready).
+    pub deployment_id: Option<String>,
+}
+
 pub fn new_id() -> String {
     Uuid::new_v4().to_string()
 }

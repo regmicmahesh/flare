@@ -34,6 +34,14 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(body || {}),
     }),
+  rollback: (id, deployment_id) =>
+    req(`/api/projects/${id}/rollback`, {
+      method: 'POST',
+      body: JSON.stringify(deployment_id ? { deployment_id } : {}),
+    }),
+  projectStats: (id) => req(`/api/projects/${id}/stats`),
+  deploymentStats: (id) => req(`/api/deployments/${id}/stats`),
+  deploymentDiff: (a, b) => req(`/api/deployments/${a}/diff/${b}`),
   promote: (id, deployment_id) =>
     req(`/api/projects/${id}/promote`, {
       method: 'POST',

@@ -16,6 +16,7 @@ use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use crate::db::AppState;
+use crate::services::analytics::track_requests;
 use crate::services::poller::start_poller;
 use crate::services::worker::BuildWorker;
 
@@ -52,8 +53,17 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .merge(api::api_routes())
         .fallback(domain_fallback)
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            track_requests,
+        ))
         .with_state(state.clone())
-        .merge(api::static_routes(state))
+        .merge(
+            api::static_routes(state.clone()).layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                track_requests,
+            )),
+        )
         .layer(cors)
         .layer(TraceLayer::new_for_http());
 
