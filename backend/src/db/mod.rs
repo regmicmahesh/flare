@@ -9,7 +9,7 @@ use crate::models::{BuildLog, Deployment, Domain, EnvVar, Project, Webhook};
 
 const PROJECT_COLS: &str = "id, name, slug, github_url, owner_repo, default_branch, framework,
                     root_directory, build_command, output_directory, install_command,
-                    last_commit_sha, production_deployment_id, created_at, updated_at,
+                    ignore_patterns, last_commit_sha, production_deployment_id, created_at, updated_at,
                     poll_enabled != 0 as poll_enabled";
 
 pub struct AppState {
@@ -45,6 +45,7 @@ impl AppState {
                 build_command TEXT,
                 output_directory TEXT,
                 install_command TEXT,
+                ignore_patterns TEXT,
                 last_commit_sha TEXT,
                 production_deployment_id TEXT,
                 created_at TEXT NOT NULL,
@@ -128,6 +129,7 @@ impl AppState {
         for stmt in [
             "ALTER TABLE projects ADD COLUMN slug TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE projects ADD COLUMN production_deployment_id TEXT",
+            "ALTER TABLE projects ADD COLUMN ignore_patterns TEXT",
         ] {
             if let Err(e) = sqlx::query(stmt).execute(&pool).await {
                 let msg = e.to_string().to_lowercase();
@@ -244,6 +246,23 @@ impl AppState {
         .await
     }
 
+    /// Case-insensitive search on name, slug, and owner_repo (SQL LIKE).
+    pub async fn search_projects(&self, q: &str) -> sqlx::Result<Vec<Project>> {
+        let needle = format!("%{}%", q.trim());
+        sqlx::query_as::<_, Project>(&format!(
+            "SELECT {PROJECT_COLS} FROM projects
+             WHERE name LIKE ? COLLATE NOCASE
+                OR slug LIKE ? COLLATE NOCASE
+                OR owner_repo LIKE ? COLLATE NOCASE
+             ORDER BY updated_at DESC"
+        ))
+        .bind(&needle)
+        .bind(&needle)
+        .bind(&needle)
+        .fetch_all(&self.pool)
+        .await
+    }
+
     pub async fn get_project(&self, id: &str) -> sqlx::Result<Option<Project>> {
         sqlx::query_as::<_, Project>(&format!("SELECT {PROJECT_COLS} FROM projects WHERE id = ?"))
             .bind(id)
@@ -292,9 +311,9 @@ impl AppState {
     pub async fn insert_project(&self, p: &Project) -> sqlx::Result<()> {
         sqlx::query(
             "INSERT INTO projects (id, name, slug, github_url, owner_repo, default_branch, framework,
-             root_directory, build_command, output_directory, install_command, last_commit_sha,
-             production_deployment_id, created_at, updated_at, poll_enabled)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             root_directory, build_command, output_directory, install_command, ignore_patterns,
+             last_commit_sha, production_deployment_id, created_at, updated_at, poll_enabled)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&p.id)
         .bind(&p.name)
@@ -307,6 +326,7 @@ impl AppState {
         .bind(&p.build_command)
         .bind(&p.output_directory)
         .bind(&p.install_command)
+        .bind(&p.ignore_patterns)
         .bind(&p.last_commit_sha)
         .bind(&p.production_deployment_id)
         .bind(p.created_at)
@@ -320,8 +340,8 @@ impl AppState {
     pub async fn update_project(&self, p: &Project) -> sqlx::Result<()> {
         sqlx::query(
             "UPDATE projects SET name=?, slug=?, default_branch=?, framework=?, root_directory=?,
-             build_command=?, output_directory=?, install_command=?, last_commit_sha=?,
-             production_deployment_id=?, updated_at=?, poll_enabled=? WHERE id=?",
+             build_command=?, output_directory=?, install_command=?, ignore_patterns=?,
+             last_commit_sha=?, production_deployment_id=?, updated_at=?, poll_enabled=? WHERE id=?",
         )
         .bind(&p.name)
         .bind(&p.slug)
@@ -331,6 +351,7 @@ impl AppState {
         .bind(&p.build_command)
         .bind(&p.output_directory)
         .bind(&p.install_command)
+        .bind(&p.ignore_patterns)
         .bind(&p.last_commit_sha)
         .bind(&p.production_deployment_id)
         .bind(p.updated_at)
