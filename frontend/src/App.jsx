@@ -202,6 +202,7 @@ function ProjectDetailPage() {
   const [savingProtect, setSavingProtect] = useState(false)
   const [redeployMins, setRedeployMins] = useState(0)
   const [savingSchedule, setSavingSchedule] = useState(false)
+  const [exporting, setExporting] = useState(false)
 
   const load = useCallback(async () => {
     try {
@@ -385,6 +386,35 @@ function ProjectDetailPage() {
                 }}
               >
                 Instant rollback
+              </button>
+              <button
+                type="button"
+                disabled={exporting}
+                title="Download redacted JSON (env keys only, no secret values)"
+                onClick={async () => {
+                  try {
+                    setExporting(true)
+                    const data = await api.exportProject(id)
+                    const blob = new Blob([JSON.stringify(data, null, 2)], {
+                      type: 'application/json',
+                    })
+                    const url = URL.createObjectURL(blob)
+                    const a = document.createElement('a')
+                    const slug = project?.slug || project?.name || id
+                    a.href = url
+                    a.download = `flare-export-${slug}.json`
+                    document.body.appendChild(a)
+                    a.click()
+                    a.remove()
+                    URL.revokeObjectURL(url)
+                  } catch (ex) {
+                    setErr(ex.message)
+                  } finally {
+                    setExporting(false)
+                  }
+                }}
+              >
+                {exporting ? 'Exporting…' : 'Export'}
               </button>
               <button type="button" className="danger" onClick={remove}>Delete</button>
             </div>

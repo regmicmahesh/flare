@@ -26,6 +26,8 @@ flowchart LR
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for components, data model, Docker topology, and API notes.
 
+For **`curl` recipes** (link public repos, deploy, logs, promote, export/import): [docs/CLI.md](docs/CLI.md).
+
 ## Features
 
 - **Public GitHub linking** — paste any public repo URL; Flare clones via `git` (no credentials)

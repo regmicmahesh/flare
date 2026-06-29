@@ -11,9 +11,10 @@ use std::sync::Arc;
 use crate::db::AppState;
 use crate::models::{
     hash_password, new_id, slugify, ActivityEntry, ActivityResponse, CommitEntry, CommitsResponse,
-    CreateProjectRequest, DeployRequest, Deployment, DeploymentHitRow, Project,
-    ProjectListResponse, ProjectStatsResponse, PromoteRequest, ProtectionResponse,
-    RollbackRequest, SetProtectionRequest, UpdateProjectRequest,
+    CreateProjectRequest, DeployRequest, Deployment, DeploymentHitRow, Domain, ImportProjectRequest,
+    Project, ProjectExport, ProjectExportWebhook, ProjectListResponse, ProjectStatsResponse,
+    PromoteRequest, ProtectionResponse, RollbackRequest, SetProtectionRequest,
+    UpdateProjectRequest, WEBHOOK_EVENTS, Webhook,
 };
 use crate::services::framework::detect_framework;
 use crate::services::git::{
@@ -23,12 +24,14 @@ use crate::services::git::{
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/projects", get(list_projects).post(create_project))
+        .route("/api/projects/import", post(import_project))
         .route(
             "/api/projects/{id}",
             get(get_project)
                 .patch(update_project)
                 .delete(delete_project),
         )
+        .route("/api/projects/{id}/export", get(export_project))
         .route("/api/projects/{id}/deploy", post(trigger_deploy))
         .route("/api/projects/{id}/promote", post(promote_deployment))
         .route("/api/projects/{id}/rollback", post(rollback_deployment))
@@ -77,6 +80,207 @@ async fn get_project(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .map(Json)
         .ok_or((StatusCode::NOT_FOUND, "project not found".into()))
+}
+
+/// Export project settings as redacted JSON (env keys only, no secret values).
+async fn export_project(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<ProjectExport>, (StatusCode, String)> {
+    let project = state
+        .get_project(&id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((StatusCode::NOT_FOUND, "project not found".into()))?;
+
+    let env = state
+        .list_env(&id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let domains = state
+        .list_domains(&id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let webhooks = state
+        .list_webhooks(&id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(ProjectExport {
+        version: 1,
+        name: project.name,
+        github_url: project.github_url,
+        owner_repo: project.owner_repo,
+        default_branch: project.default_branch,
+        framework: project.framework,
+        root_directory: project.root_directory,
+        build_command: project.build_command,
+        output_directory: project.output_directory,
+        install_command: project.install_command,
+        ignore_patterns: project.ignore_patterns,
+        poll_enabled: project.poll_enabled,
+        redeploy_interval_mins: project.redeploy_interval_mins,
+        password_protect: project.protect_secret.is_some(),
+        env_keys: env.into_iter().map(|e| e.key).collect(),
+        domain_hosts: domains.into_iter().map(|d| d.host).collect(),
+        webhooks: webhooks
+            .into_iter()
+            .map(|w| ProjectExportWebhook {
+                url: w.url,
+                events: w.events,
+            })
+            .collect(),
+    }))
+}
+
+/// Create a project from GitHub plus optional non-secret overrides (from export JSON).
+/// Never accepts or stores env values or protection passwords from the import body.
+async fn import_project(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<ImportProjectRequest>,
+) -> Result<(StatusCode, Json<Project>), (StatusCode, String)> {
+    let parsed =
+        parse_github_input(&body.github).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+
+    let branch = body.branch.clone().unwrap_or_else(|| "main".to_string());
+    let name = body.name.clone().unwrap_or_else(|| parsed.repo.clone());
+    let now = Utc::now();
+    let id = new_id();
+    let slug = state
+        .allocate_slug(&slugify(&name), None)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let repo_path = state.data_dir.join("repos").join(&id);
+    clone_or_fetch(&parsed.clone_url, &repo_path, &branch)
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("git clone failed: {e}")))?;
+
+    let root = body.root_directory.clone().unwrap_or_else(|| ".".into());
+    let work = if root == "." {
+        repo_path.clone()
+    } else {
+        repo_path.join(&root)
+    };
+    let fw = detect_framework(&work);
+
+    let ignore_patterns = body.ignore_patterns.and_then(|ip| {
+        let t = ip.trim().to_string();
+        if t.is_empty() {
+            None
+        } else {
+            Some(t)
+        }
+    });
+
+    let mut project = Project {
+        id: id.clone(),
+        name,
+        slug,
+        github_url: parsed.html_url.clone(),
+        owner_repo: format!("{}/{}", parsed.owner, parsed.repo),
+        default_branch: branch.clone(),
+        framework: fw.framework.clone(),
+        root_directory: root,
+        build_command: body.build_command.or(fw.build_command.clone()),
+        output_directory: body.output_directory.or(fw.output_directory.clone()),
+        install_command: body.install_command.or(fw.install_command.clone()),
+        ignore_patterns,
+        // Never import protection passwords / hashes.
+        protect_secret: None,
+        redeploy_interval_mins: i64::from(body.redeploy_interval_mins.unwrap_or(0)),
+        last_commit_sha: None,
+        production_deployment_id: None,
+        created_at: now,
+        updated_at: now,
+        poll_enabled: body.poll_enabled.unwrap_or(true),
+    };
+
+    let head = remote_head(&repo_path, &branch).await.ok();
+    project.last_commit_sha = head.clone();
+
+    state
+        .insert_project(&project)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // Apply non-secret overrides: domains and webhook URLs only.
+    if let Some(hosts) = body.domain_hosts {
+        for host_raw in hosts {
+            let host = super::normalize_host(&host_raw);
+            if host.is_empty() {
+                continue;
+            }
+            let domain = Domain {
+                id: new_id(),
+                project_id: id.clone(),
+                host,
+                created_at: Utc::now(),
+            };
+            // Skip duplicates / conflicts without failing the whole import.
+            let _ = state.insert_domain(&domain).await;
+        }
+    }
+
+    if let Some(hooks) = body.webhooks {
+        let default_events = WEBHOOK_EVENTS.join(",");
+        for h in hooks {
+            let url = h.url.trim().to_string();
+            if url.is_empty() {
+                continue;
+            }
+            let events = h
+                .events
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or(&default_events)
+                .to_string();
+            let wh = Webhook {
+                id: new_id(),
+                project_id: id.clone(),
+                url,
+                events,
+                created_at: Utc::now(),
+            };
+            let _ = state.insert_webhook(&wh).await;
+        }
+    }
+
+    // env_keys from export are accepted for round-trip compatibility but never create rows
+    // (no values / secrets). Operator must set secrets via POST /api/projects/{id}/env.
+    let _env_keys_hint = body.env_keys.unwrap_or_default();
+    let _ = _env_keys_hint;
+
+    // Initial deployment
+    if let Some(sha) = head {
+        let dep_id = new_id();
+        let dep = Deployment {
+            id: dep_id.clone(),
+            project_id: id,
+            commit_sha: sha,
+            commit_message: Some("Initial import".into()),
+            commit_author: None,
+            branch,
+            status: "queued".into(),
+            framework: project.framework.clone(),
+            url_path: None,
+            error_message: None,
+            changed_files: None,
+            created_at: Utc::now(),
+            finished_at: None,
+        };
+        let _ = state.insert_deployment(&dep).await;
+        crate::services::webhooks::dispatch_event(
+            state.clone(),
+            project.id.clone(),
+            "deployment.queued",
+            &dep,
+        );
+        state.enqueue_build(dep_id);
+    }
+
+    Ok((StatusCode::CREATED, Json(project)))
 }
 
 async fn create_project(

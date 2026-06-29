@@ -32,6 +32,7 @@ async fn version() -> Json<VersionResponse> {
             "rollback",
             "ignore-patterns",
             "project-search",
+            "project-export-import",
         ],
     })
 }

@@ -149,6 +149,68 @@ pub struct CreateProjectRequest {
     pub install_command: Option<String>,
 }
 
+/// Redacted project export (no secrets / env values / protect passwords).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectExport {
+    /// Schema version for future compatibility.
+    pub version: u32,
+    pub name: String,
+    pub github_url: String,
+    pub owner_repo: String,
+    pub default_branch: String,
+    pub framework: Option<String>,
+    pub root_directory: String,
+    pub build_command: Option<String>,
+    pub output_directory: Option<String>,
+    pub install_command: Option<String>,
+    /// Newline-separated ignore globs (no secrets).
+    pub ignore_patterns: Option<String>,
+    pub poll_enabled: bool,
+    pub redeploy_interval_mins: i64,
+    /// Whether password protection was enabled (password never exported).
+    pub password_protect: bool,
+    /// Env **keys only** — values are never included by default.
+    pub env_keys: Vec<String>,
+    /// Custom domain hosts only.
+    pub domain_hosts: Vec<String>,
+    /// Webhook URLs and event subscriptions (no signing secrets for MVP).
+    pub webhooks: Vec<ProjectExportWebhook>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectExportWebhook {
+    pub url: String,
+    pub events: String,
+}
+
+/// Import a project from GitHub plus optional overrides from an export (no secrets).
+#[derive(Debug, Deserialize)]
+pub struct ImportProjectRequest {
+    /// Public GitHub URL or `owner/repo` (required).
+    pub github: String,
+    pub name: Option<String>,
+    pub branch: Option<String>,
+    pub root_directory: Option<String>,
+    pub build_command: Option<String>,
+    pub output_directory: Option<String>,
+    pub install_command: Option<String>,
+    pub ignore_patterns: Option<String>,
+    pub poll_enabled: Option<bool>,
+    pub redeploy_interval_mins: Option<u32>,
+    /// Domain hosts to register after create (no secrets).
+    pub domain_hosts: Option<Vec<String>>,
+    /// Webhook URLs (+ optional events) to register after create.
+    pub webhooks: Option<Vec<ImportWebhook>>,
+    /// Env **keys only** — recorded in response as placeholders; values must be set separately.
+    pub env_keys: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ImportWebhook {
+    pub url: String,
+    pub events: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct UpdateProjectRequest {
     pub name: Option<String>,

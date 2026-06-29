@@ -73,6 +73,10 @@ flowchart LR
 | GET/POST/DELETE | `/api/projects/{id}/webhooks…` | Outgoing deploy hooks |
 | GET/POST/DELETE | `/api/projects/{id}/domains…` | Custom domain host mapping |
 | GET/PATCH | `/api/settings` | Platform settings (SQLite) |
+| GET | `/api/projects/{id}/export` | Redacted project JSON (env keys only, no secrets) |
+| POST | `/api/projects/import` | Create from GitHub + optional non-secret overrides |
+
+CLI-oriented `curl` recipes for the full API: [CLI.md](./CLI.md).
 
 Custom domains: when `Host` matches a mapped domain, the API fallback serves the latest **ready** deployment for that project (point DNS/`/etc/hosts` at Flare).
 
