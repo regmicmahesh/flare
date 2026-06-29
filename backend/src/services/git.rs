@@ -170,6 +170,81 @@ pub async fn changed_files(repo: &Path, from: &str, to: &str) -> Result<Vec<Stri
         .collect())
 }
 
+#[derive(Debug, Clone)]
+pub struct CommitInfo {
+    pub sha: String,
+    pub message: String,
+    pub author: String,
+    pub date: String,
+}
+
+/// List recent commits from the local clone via `git log` (no GitHub API).
+pub async fn list_commits(repo: &Path, limit: usize) -> Result<Vec<CommitInfo>> {
+    let n = limit.clamp(1, 100).to_string();
+    // %x1f = unit separator between fields; %x1e = record separator between commits
+    let out = Command::new("git")
+        .args(["-C"])
+        .arg(repo)
+        .args([
+            "log",
+            &format!("-n{n}"),
+            "--format=%H%x1f%s%x1f%an%x1f%aI%x1e",
+        ])
+        .output()
+        .await
+        .context("git log")?;
+    if !out.status.success() {
+        bail!(
+            "git log failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut commits = Vec::new();
+    for record in text.split('\u{1e}') {
+        let record = record.trim();
+        if record.is_empty() {
+            continue;
+        }
+        let parts: Vec<&str> = record.split('\u{1f}').collect();
+        if parts.len() < 4 {
+            continue;
+        }
+        commits.push(CommitInfo {
+            sha: parts[0].trim().to_string(),
+            message: parts[1].trim().to_string(),
+            author: parts[2].trim().to_string(),
+            date: parts[3].trim().to_string(),
+        });
+    }
+    Ok(commits)
+}
+
+/// Returns a skip message when `changed_files` is present and none of the paths
+/// fall under `root_directory`. When root is `.` (whole repo), never skip.
+pub fn should_skip_build(root_directory: &str, changed_files: Option<&str>) -> Option<String> {
+    let files_str = changed_files?;
+    let files: Vec<&str> = files_str
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    if files.is_empty() {
+        return None;
+    }
+    let root = root_directory.trim().trim_end_matches('/');
+    if root.is_empty() || root == "." {
+        return None;
+    }
+    let prefix = format!("{root}/");
+    let any_relevant = files.iter().any(|f| *f == root || f.starts_with(&prefix));
+    if any_relevant {
+        None
+    } else {
+        Some(format!("Skipped: no changes under root_directory '{root}'"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -187,5 +262,33 @@ mod tests {
         let r = parse_github_input("https://github.com/rust-lang/mdBook/").unwrap();
         assert_eq!(r.owner, "rust-lang");
         assert_eq!(r.repo, "mdBook");
+    }
+
+    #[test]
+    fn skip_when_no_files_under_root() {
+        let msg = should_skip_build(
+            "apps/web",
+            Some("README.md\ndocs/guide.md\napps/api/main.rs"),
+        );
+        assert!(msg.is_some());
+        assert!(msg.unwrap().contains("apps/web"));
+    }
+
+    #[test]
+    fn no_skip_when_file_under_root() {
+        assert!(should_skip_build("apps/web", Some("apps/web/src/index.js\nREADME.md")).is_none());
+        assert!(should_skip_build("apps/web", Some("apps/web")).is_none());
+    }
+
+    #[test]
+    fn no_skip_for_repo_root() {
+        assert!(should_skip_build(".", Some("README.md")).is_none());
+        assert!(should_skip_build("", Some("README.md")).is_none());
+    }
+
+    #[test]
+    fn no_skip_without_changed_files() {
+        assert!(should_skip_build("apps/web", None).is_none());
+        assert!(should_skip_build("apps/web", Some("")).is_none());
     }
 }

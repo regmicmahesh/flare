@@ -159,23 +159,27 @@ function ProjectDetailPage() {
   const nav = useNavigate()
   const [project, setProject] = useState(null)
   const [deployments, setDeployments] = useState([])
+  const [commits, setCommits] = useState([])
   const [env, setEnv] = useState([])
   const [ek, setEk] = useState('')
   const [ev, setEv] = useState('')
   const [err, setErr] = useState('')
   const [logsFor, setLogsFor] = useState(null)
   const [logs, setLogs] = useState([])
+  const [deployingSha, setDeployingSha] = useState(null)
 
   const load = useCallback(async () => {
     try {
-      const [p, d, e] = await Promise.all([
+      const [p, d, e, c] = await Promise.all([
         api.getProject(id),
         api.listDeployments(id),
         api.listEnv(id),
+        api.listCommits(id, 20).catch(() => ({ commits: [] })),
       ])
       setProject(p)
       setDeployments(d.deployments || [])
       setEnv(e.env || [])
+      setCommits(c.commits || [])
       setErr('')
     } catch (ex) {
       setErr(ex.message)
@@ -207,12 +211,15 @@ function ProjectDetailPage() {
     }
   }, [logsFor])
 
-  async function redeploy() {
+  async function redeploy(commitSha) {
     try {
-      await api.deploy(id)
+      setDeployingSha(commitSha || 'head')
+      await api.deploy(id, commitSha ? { commit_sha: commitSha } : undefined)
       await load()
     } catch (ex) {
       setErr(ex.message)
+    } finally {
+      setDeployingSha(null)
     }
   }
 
@@ -250,11 +257,60 @@ function ProjectDetailPage() {
               {' · '}
               branch <code>{project.default_branch}</code>
               {project.framework && <> · <span className="pill">{project.framework}</span></>}
+              {project.root_directory && project.root_directory !== '.' && (
+                <> · root <code>{project.root_directory}</code></>
+              )}
             </p>
             <div className="row">
-              <button className="primary" type="button" onClick={redeploy}>Deploy now</button>
+              <button
+                className="primary"
+                type="button"
+                onClick={() => redeploy()}
+                disabled={!!deployingSha}
+              >
+                {deployingSha === 'head' ? 'Deploying…' : 'Deploy now'}
+              </button>
               <button type="button" className="danger" onClick={remove}>Delete</button>
             </div>
+          </div>
+
+          <h2 style={{ fontSize: '1.1rem', marginTop: '1.5rem' }}>Recent commits</h2>
+          <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>SHA</th>
+                  <th>Message</th>
+                  <th>Author</th>
+                  <th>Date</th>
+                  <th />
+                </tr>
+              </thead>
+              <tbody>
+                {commits.map((c) => (
+                  <tr key={c.sha}>
+                    <td><code>{c.sha?.slice(0, 7)}</code></td>
+                    <td className="muted">{c.message || '—'}</td>
+                    <td className="muted">{c.author || '—'}</td>
+                    <td className="muted" style={{ whiteSpace: 'nowrap' }}>
+                      {c.date ? new Date(c.date).toLocaleString() : '—'}
+                    </td>
+                    <td>
+                      <button
+                        type="button"
+                        disabled={!!deployingSha}
+                        onClick={() => redeploy(c.sha)}
+                      >
+                        {deployingSha === c.sha ? '…' : 'Deploy'}
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+                {!commits.length && (
+                  <tr><td colSpan={5} className="muted">No commits found (is the repo cloned?)</td></tr>
+                )}
+              </tbody>
+            </table>
           </div>
 
           <h2 style={{ fontSize: '1.1rem', marginTop: '1.5rem' }}>Deployments</h2>
@@ -273,7 +329,11 @@ function ProjectDetailPage() {
               <tbody>
                 {deployments.map((d) => (
                   <tr key={d.id}>
-                    <td><span className={`status ${statusClass(d.status)}`}>{d.status}</span></td>
+                    <td>
+                      <span className={`status ${statusClass(d.status)}`} title={d.error_message || ''}>
+                        {d.status}
+                      </span>
+                    </td>
                     <td><code>{d.commit_sha?.slice(0, 7)}</code></td>
                     <td className="muted">{d.commit_message || '—'}</td>
                     <td className="muted" style={{ maxWidth: 180, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
@@ -308,6 +368,11 @@ function ProjectDetailPage() {
                 ))}
                 {!logs.length && <span className="muted">Waiting for logs…</span>}
               </div>
+              {deployments.find((d) => d.id === logsFor)?.error_message && (
+                <p className="muted" style={{ marginTop: '0.5rem' }}>
+                  {deployments.find((d) => d.id === logsFor).error_message}
+                </p>
+              )}
               {deployments.find((d) => d.id === logsFor)?.changed_files && (
                 <>
                   <h3 style={{ fontSize: '0.95rem' }}>Changed files</h3>

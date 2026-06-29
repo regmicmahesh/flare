@@ -29,8 +29,15 @@ export const api = {
   updateProject: (id, body) =>
     req(`/api/projects/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
   deleteProject: (id) => req(`/api/projects/${id}`, { method: 'DELETE' }),
-  deploy: (id) => req(`/api/projects/${id}/deploy`, { method: 'POST' }),
+  deploy: (id, body) =>
+    req(`/api/projects/${id}/deploy`, {
+      method: 'POST',
+      body: JSON.stringify(body || {}),
+    }),
   listDeployments: (id) => req(`/api/projects/${id}/deployments`),
+  listCommits: (id, limit = 20) =>
+    req(`/api/projects/${id}/commits?limit=${limit}`),
+  listActivity: (id) => req(`/api/projects/${id}/activity`),
   getDeployment: (id) => req(`/api/deployments/${id}`),
   getLogs: (id) => req(`/api/deployments/${id}/logs`),
   listEnv: (id) => req(`/api/projects/${id}/env`),
