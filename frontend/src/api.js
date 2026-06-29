@@ -83,4 +83,10 @@ export const api = {
     }),
   deleteDomain: (id, domainId) =>
     req(`/api/projects/${id}/domains/${domainId}`, { method: 'DELETE' }),
+  setProtection: (id, password) =>
+    req(`/api/projects/${id}/protection`, {
+      method: 'POST',
+      body: JSON.stringify({ password }),
+    }),
+  version: () => req('/api/version'),
 }

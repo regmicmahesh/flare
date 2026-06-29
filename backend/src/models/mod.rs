@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
@@ -17,11 +18,89 @@ pub struct Project {
     pub install_command: Option<String>,
     /// Newline-separated glob patterns (e.g. `*.md`, `docs/**`). Optional.
     pub ignore_patterns: Option<String>,
+    /// sha256(password) hex when deployment protection is enabled. Serialized as `password_protect` bool.
+    #[serde(
+        skip_deserializing,
+        rename = "password_protect",
+        serialize_with = "serialize_password_protect"
+    )]
+    pub protect_secret: Option<String>,
+    /// Minutes between forced redeploys (0 = off). In addition to commit polling.
+    pub redeploy_interval_mins: i64,
     pub last_commit_sha: Option<String>,
     pub production_deployment_id: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub poll_enabled: bool,
+}
+
+fn serialize_password_protect<S>(secret: &Option<String>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    serializer.serialize_bool(secret.is_some())
+}
+
+/// sha256 hex digest of `password` (MVP — not production-grade password storage).
+pub fn hash_password(password: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(password.as_bytes());
+    hex::encode(hasher.finalize())
+}
+
+/// Access token derived from stored protect_secret (sha256 of the secret).
+pub fn access_token_from_secret(protect_secret: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(protect_secret.as_bytes());
+    hex::encode(hasher.finalize())
+}
+
+/// Cookie value: `{project_id}:{token}`.
+pub fn flare_access_cookie_value(project_id: &str, token: &str) -> String {
+    format!("{project_id}:{token}")
+}
+
+/// Returns true if the request is authorized for a protected project.
+pub fn check_project_access(
+    project_id: &str,
+    protect_secret: &str,
+    authorization: Option<&str>,
+    cookie_header: Option<&str>,
+) -> bool {
+    let expected = access_token_from_secret(protect_secret);
+    if let Some(auth) = authorization {
+        let bearer = auth
+            .strip_prefix("Bearer ")
+            .or_else(|| auth.strip_prefix("bearer "))
+            .map(str::trim)
+            .unwrap_or(auth.trim());
+        if !bearer.is_empty() && (bearer == expected || hash_password(bearer) == protect_secret) {
+            return true;
+        }
+    }
+    if let Some(cookie) = cookie_header {
+        let needle = format!("flare_access={}", flare_access_cookie_value(project_id, &expected));
+        // Also accept legacy/simple form where token == protect_secret for local demos.
+        let needle_secret = format!(
+            "flare_access={}",
+            flare_access_cookie_value(project_id, protect_secret)
+        );
+        for part in cookie.split(';') {
+            let p = part.trim();
+            if p == needle || p == needle_secret {
+                return true;
+            }
+            // Allow any flare_access for this project_id whose token matches.
+            if let Some(rest) = p.strip_prefix("flare_access=") {
+                if let Some((pid, tok)) = rest.split_once(':') {
+                    if pid == project_id && (tok == expected || tok == protect_secret) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
@@ -81,6 +160,25 @@ pub struct UpdateProjectRequest {
     /// Newline-separated glob patterns to ignore for smart skip.
     pub ignore_patterns: Option<String>,
     pub poll_enabled: Option<bool>,
+    /// Minutes between forced redeploys (0 = off).
+    pub redeploy_interval_mins: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SetProtectionRequest {
+    /// Set password to enable protection; `null` or omit empty to clear.
+    pub password: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ProtectionResponse {
+    pub password_protect: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct VersionResponse {
+    pub version: &'static str,
+    pub features: Vec<&'static str>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -268,7 +366,9 @@ pub fn slugify(name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::slugify;
+    use super::{
+        access_token_from_secret, check_project_access, hash_password, slugify,
+    };
 
     #[test]
     fn slugify_basic() {
@@ -276,5 +376,55 @@ mod tests {
         assert_eq!(slugify("  hello!!world  "), "hello-world");
         assert_eq!(slugify("---"), "project");
         assert_eq!(slugify("API_v2"), "api-v2");
+    }
+
+    #[test]
+    fn password_hash_and_token() {
+        let secret = hash_password("s3cret");
+        assert_eq!(secret.len(), 64);
+        assert_ne!(secret, hash_password("other"));
+        let token = access_token_from_secret(&secret);
+        assert_eq!(token.len(), 64);
+        assert_ne!(token, secret);
+    }
+
+    #[test]
+    fn access_check_bearer_token_and_password() {
+        let pid = "proj-1";
+        let secret = hash_password("hunter2");
+        let token = access_token_from_secret(&secret);
+        assert!(check_project_access(
+            pid,
+            &secret,
+            Some(&format!("Bearer {token}")),
+            None
+        ));
+        assert!(check_project_access(
+            pid,
+            &secret,
+            Some("Bearer hunter2"),
+            None
+        ));
+        assert!(!check_project_access(
+            pid,
+            &secret,
+            Some("Bearer wrong"),
+            None
+        ));
+    }
+
+    #[test]
+    fn access_check_cookie() {
+        let pid = "proj-1";
+        let secret = hash_password("hunter2");
+        let token = access_token_from_secret(&secret);
+        let cookie = format!("session=abc; flare_access={pid}:{token}; other=1");
+        assert!(check_project_access(pid, &secret, None, Some(&cookie)));
+        assert!(!check_project_access(
+            "other-proj",
+            &secret,
+            None,
+            Some(&cookie)
+        ));
     }
 }

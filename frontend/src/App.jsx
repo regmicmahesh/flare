@@ -103,6 +103,10 @@ function ProjectsPage() {
                 {p.framework && <span className="pill">{p.framework}</span>}
                 <span className="pill">{p.default_branch}</span>
                 {p.poll_enabled && <span className="pill">auto-deploy</span>}
+                {p.password_protect && <span className="pill">protected</span>}
+                {p.redeploy_interval_mins > 0 && (
+                  <span className="pill">every {p.redeploy_interval_mins}m</span>
+                )}
               </div>
             </article>
           </Link>
@@ -194,6 +198,10 @@ function ProjectDetailPage() {
   const [cancelling, setCancelling] = useState(null)
   const [ignorePatterns, setIgnorePatterns] = useState('')
   const [savingIgnore, setSavingIgnore] = useState(false)
+  const [protectPassword, setProtectPassword] = useState('')
+  const [savingProtect, setSavingProtect] = useState(false)
+  const [redeployMins, setRedeployMins] = useState(0)
+  const [savingSchedule, setSavingSchedule] = useState(false)
 
   const load = useCallback(async () => {
     try {
@@ -223,9 +231,10 @@ function ProjectDetailPage() {
     return () => clearInterval(t)
   }, [load])
 
-  // Seed ignore patterns when navigating to a project (don't clobber edits on poll).
+  // Seed form fields when navigating to a project (don't clobber edits on poll).
   useEffect(() => {
     setIgnorePatterns(project?.ignore_patterns || '')
+    setRedeployMins(project?.redeploy_interval_mins ?? 0)
   }, [id, project?.id])
 
   useEffect(() => {
@@ -570,6 +579,106 @@ function ProjectDetailPage() {
                 {savingIgnore ? 'Saving…' : 'Save ignore patterns'}
               </button>
             </div>
+          </form>
+
+          <h2 style={{ fontSize: '1.1rem', marginTop: '1.5rem' }}>
+            Password protection
+            {project.password_protect && (
+              <span className="pill" style={{ marginLeft: 8, fontSize: '0.75rem' }}>enabled</span>
+            )}
+          </h2>
+          <p className="muted" style={{ marginTop: 0, fontSize: '0.85rem', maxWidth: '60ch' }}>
+            When set, requests to <code>/p/…</code>, <code>/s/…</code>, and custom domains require
+            cookie <code>flare_access=&#123;project_id&#125;:&#123;token&#125;</code> or{' '}
+            <code>Authorization: Bearer &lt;token|password&gt;</code> (MVP sha256 storage).
+          </p>
+          <form
+            className="row form"
+            style={{ maxWidth: '100%' }}
+            onSubmit={async (e) => {
+              e.preventDefault()
+              try {
+                setSavingProtect(true)
+                const res = await api.setProtection(id, protectPassword)
+                setProtectPassword('')
+                setProject((prev) => (prev ? { ...prev, password_protect: res.password_protect } : prev))
+              } catch (ex) {
+                setErr(ex.message)
+              } finally {
+                setSavingProtect(false)
+              }
+            }}
+          >
+            <input
+              type="password"
+              placeholder="New protection password"
+              value={protectPassword}
+              onChange={(e) => setProtectPassword(e.target.value)}
+              style={{ flex: 1, minWidth: 180 }}
+              autoComplete="new-password"
+            />
+            <button className="primary" type="submit" disabled={savingProtect || !protectPassword}>
+              {savingProtect ? 'Saving…' : 'Set password'}
+            </button>
+            {project.password_protect && (
+              <button
+                type="button"
+                className="danger"
+                disabled={savingProtect}
+                onClick={async () => {
+                  try {
+                    setSavingProtect(true)
+                    const res = await api.setProtection(id, null)
+                    setProject((prev) => (prev ? { ...prev, password_protect: res.password_protect } : prev))
+                  } catch (ex) {
+                    setErr(ex.message)
+                  } finally {
+                    setSavingProtect(false)
+                  }
+                }}
+              >
+                Clear protection
+              </button>
+            )}
+          </form>
+
+          <h2 style={{ fontSize: '1.1rem', marginTop: '1.5rem' }}>Scheduled redeploy</h2>
+          <p className="muted" style={{ marginTop: 0, fontSize: '0.85rem', maxWidth: '60ch' }}>
+            Redeploy every N minutes even without new commits (0 = off). Uses the same poller loop
+            as commit checks.
+          </p>
+          <form
+            className="row form"
+            style={{ maxWidth: '100%' }}
+            onSubmit={async (e) => {
+              e.preventDefault()
+              try {
+                setSavingSchedule(true)
+                const mins = Math.max(0, Math.floor(Number(redeployMins) || 0))
+                const updated = await api.updateProject(id, { redeploy_interval_mins: mins })
+                setProject(updated)
+                setRedeployMins(updated.redeploy_interval_mins ?? 0)
+              } catch (ex) {
+                setErr(ex.message)
+              } finally {
+                setSavingSchedule(false)
+              }
+            }}
+          >
+            <label className="row" style={{ gap: '0.5rem', alignItems: 'center' }}>
+              Interval (minutes)
+              <input
+                type="number"
+                min={0}
+                step={1}
+                value={redeployMins}
+                onChange={(e) => setRedeployMins(e.target.value)}
+                style={{ width: 100 }}
+              />
+            </label>
+            <button className="primary" type="submit" disabled={savingSchedule}>
+              {savingSchedule ? 'Saving…' : 'Save schedule'}
+            </button>
           </form>
 
           <h2 style={{ fontSize: '1.1rem', marginTop: '1.5rem' }}>Environment variables</h2>

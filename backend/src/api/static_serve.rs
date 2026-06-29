@@ -1,4 +1,4 @@
-//! Static deployment serving with SPA fallback and production aliases.
+//! Static deployment serving with SPA fallback, production aliases, and optional password protection.
 
 use axum::{
     body::Body,
@@ -14,6 +14,7 @@ use tower::ServiceExt;
 use tower_http::services::ServeDir;
 
 use crate::db::AppState;
+use crate::models::{check_project_access, Project};
 
 pub fn routes(state: Arc<AppState>) -> Router {
     Router::new()
@@ -43,40 +44,130 @@ async fn serve_deploy_path(
 async fn serve_project_root(
     State(state): State<Arc<AppState>>,
     Path(project_id): Path<String>,
+    req: Request<Body>,
 ) -> Response {
-    alias_response(
-        &state,
-        resolve_project_deployment(&state, &project_id).await,
-        "",
-    )
-    .await
+    match load_project_by_id(&state, &project_id).await {
+        Ok(project) => {
+            if let Some(denied) = protection_denied(&project, &req) {
+                return denied;
+            }
+            alias_response(
+                &state,
+                resolve_alias_dep_id(&state, &project).await,
+                "",
+            )
+            .await
+        }
+        Err(r) => r,
+    }
 }
 
 async fn serve_project_path(
     State(state): State<Arc<AppState>>,
     Path((project_id, path)): Path<(String, String)>,
+    req: Request<Body>,
 ) -> Response {
-    alias_response(
-        &state,
-        resolve_project_deployment(&state, &project_id).await,
-        &path,
-    )
-    .await
+    match load_project_by_id(&state, &project_id).await {
+        Ok(project) => {
+            if let Some(denied) = protection_denied(&project, &req) {
+                return denied;
+            }
+            alias_response(
+                &state,
+                resolve_alias_dep_id(&state, &project).await,
+                &path,
+            )
+            .await
+        }
+        Err(r) => r,
+    }
 }
 
-async fn serve_slug_root(State(state): State<Arc<AppState>>, Path(slug): Path<String>) -> Response {
-    alias_response(&state, resolve_slug_deployment(&state, &slug).await, "").await
+async fn serve_slug_root(
+    State(state): State<Arc<AppState>>,
+    Path(slug): Path<String>,
+    req: Request<Body>,
+) -> Response {
+    match load_project_by_slug(&state, &slug).await {
+        Ok(project) => {
+            if let Some(denied) = protection_denied(&project, &req) {
+                return denied;
+            }
+            alias_response(
+                &state,
+                resolve_alias_dep_id(&state, &project).await,
+                "",
+            )
+            .await
+        }
+        Err(r) => r,
+    }
 }
 
 async fn serve_slug_path(
     State(state): State<Arc<AppState>>,
     Path((slug, path)): Path<(String, String)>,
+    req: Request<Body>,
 ) -> Response {
-    alias_response(&state, resolve_slug_deployment(&state, &slug).await, &path).await
+    match load_project_by_slug(&state, &slug).await {
+        Ok(project) => {
+            if let Some(denied) = protection_denied(&project, &req) {
+                return denied;
+            }
+            alias_response(
+                &state,
+                resolve_alias_dep_id(&state, &project).await,
+                &path,
+            )
+            .await
+        }
+        Err(r) => r,
+    }
+}
+
+/// Shared protection gate for /p, /s, and custom domains.
+pub fn protection_denied(project: &Project, req: &Request<Body>) -> Option<Response> {
+    let Some(secret) = project.protect_secret.as_deref() else {
+        return None;
+    };
+    let auth = req
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok());
+    let cookie = req
+        .headers()
+        .get(header::COOKIE)
+        .and_then(|v| v.to_str().ok());
+    if check_project_access(&project.id, secret, auth, cookie) {
+        None
+    } else {
+        Some(
+            (
+                StatusCode::UNAUTHORIZED,
+                "password required — send Authorization: Bearer <token> or cookie flare_access={project_id}:{token}",
+            )
+                .into_response(),
+        )
+    }
+}
+
+async fn load_project_by_id(state: &AppState, project_id: &str) -> Result<Project, Response> {
+    match state.get_project(project_id).await {
+        Ok(Some(p)) => Ok(p),
+        Ok(None) => Err((StatusCode::NOT_FOUND, "project not found").into_response()),
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()),
+    }
+}
+
+async fn load_project_by_slug(state: &AppState, slug: &str) -> Result<Project, Response> {
+    match state.get_project_by_slug(slug).await {
+        Ok(Some(p)) => Ok(p),
+        Ok(None) => Err((StatusCode::NOT_FOUND, "project not found").into_response()),
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()),
+    }
 }
 
 enum ResolveErr {
-    NotFound(&'static str),
     Internal(String),
 }
 
@@ -88,38 +179,16 @@ async fn alias_response(
     match resolved {
         Ok(Some(dep_id)) => serve_from_deployment(state, &dep_id, path).await,
         Ok(None) => (StatusCode::NOT_FOUND, "no ready deployment").into_response(),
-        Err(ResolveErr::NotFound(msg)) => (StatusCode::NOT_FOUND, msg).into_response(),
         Err(ResolveErr::Internal(e)) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
     }
 }
 
-async fn resolve_project_deployment(
+async fn resolve_alias_dep_id(
     state: &AppState,
-    project_id: &str,
+    project: &Project,
 ) -> Result<Option<String>, ResolveErr> {
-    let project = state
-        .get_project(project_id)
-        .await
-        .map_err(|e| ResolveErr::Internal(e.to_string()))?
-        .ok_or(ResolveErr::NotFound("project not found"))?;
     state
-        .resolve_alias_deployment(&project)
-        .await
-        .map(|d| d.map(|d| d.id))
-        .map_err(|e| ResolveErr::Internal(e.to_string()))
-}
-
-async fn resolve_slug_deployment(
-    state: &AppState,
-    slug: &str,
-) -> Result<Option<String>, ResolveErr> {
-    let project = state
-        .get_project_by_slug(slug)
-        .await
-        .map_err(|e| ResolveErr::Internal(e.to_string()))?
-        .ok_or(ResolveErr::NotFound("project not found"))?;
-    state
-        .resolve_alias_deployment(&project)
+        .resolve_alias_deployment(project)
         .await
         .map(|d| d.map(|d| d.id))
         .map_err(|e| ResolveErr::Internal(e.to_string()))

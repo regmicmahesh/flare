@@ -10,10 +10,10 @@ use std::sync::Arc;
 
 use crate::db::AppState;
 use crate::models::{
-    new_id, slugify, ActivityEntry, ActivityResponse, CommitEntry, CommitsResponse,
+    hash_password, new_id, slugify, ActivityEntry, ActivityResponse, CommitEntry, CommitsResponse,
     CreateProjectRequest, DeployRequest, Deployment, DeploymentHitRow, Project,
-    ProjectListResponse, ProjectStatsResponse, PromoteRequest, RollbackRequest,
-    UpdateProjectRequest,
+    ProjectListResponse, ProjectStatsResponse, PromoteRequest, ProtectionResponse,
+    RollbackRequest, SetProtectionRequest, UpdateProjectRequest,
 };
 use crate::services::framework::detect_framework;
 use crate::services::git::{
@@ -35,6 +35,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/api/projects/{id}/stats", get(project_stats))
         .route("/api/projects/{id}/commits", get(list_project_commits))
         .route("/api/projects/{id}/activity", get(project_activity))
+        .route("/api/projects/{id}/protection", post(set_protection))
 }
 
 #[derive(Debug, Deserialize)]
@@ -120,6 +121,8 @@ async fn create_project(
         output_directory: body.output_directory.or(fw.output_directory.clone()),
         install_command: body.install_command.or(fw.install_command.clone()),
         ignore_patterns: None,
+        protect_secret: None,
+        redeploy_interval_mins: 0,
         last_commit_sha: None,
         production_deployment_id: None,
         created_at: now,
@@ -202,6 +205,9 @@ async fn update_project(
     if let Some(pe) = body.poll_enabled {
         p.poll_enabled = pe;
     }
+    if let Some(mins) = body.redeploy_interval_mins {
+        p.redeploy_interval_mins = i64::from(mins);
+    }
     p.updated_at = Utc::now();
 
     state
@@ -209,6 +215,41 @@ async fn update_project(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok(Json(p))
+}
+
+/// Set or clear deployment password protection.
+/// Body: `{ "password": "..." }` to enable, `{ "password": null }` to clear.
+async fn set_protection(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(body): Json<SetProtectionRequest>,
+) -> Result<Json<ProtectionResponse>, (StatusCode, String)> {
+    let mut p = state
+        .get_project(&id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((StatusCode::NOT_FOUND, "project not found".into()))?;
+
+    match body.password {
+        None => {
+            p.protect_secret = None;
+        }
+        Some(pw) if pw.is_empty() => {
+            p.protect_secret = None;
+        }
+        Some(pw) => {
+            p.protect_secret = Some(hash_password(&pw));
+        }
+    }
+    p.updated_at = Utc::now();
+    state
+        .update_project(&p)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(ProtectionResponse {
+        password_protect: p.protect_secret.is_some(),
+    }))
 }
 
 async fn delete_project(
