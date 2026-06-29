@@ -83,6 +83,40 @@ pub struct UpsertEnvRequest {
     pub value: String,
 }
 
+#[derive(Debug, Default, Deserialize)]
+pub struct DeployRequest {
+    /// Optional commit SHA to deploy; defaults to branch HEAD.
+    pub commit_sha: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CommitEntry {
+    pub sha: String,
+    pub message: String,
+    pub author: String,
+    pub date: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CommitsResponse {
+    pub commits: Vec<CommitEntry>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ActivityEntry {
+    pub id: String,
+    pub status: String,
+    pub commit_sha: String,
+    pub commit_message: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub url_path: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ActivityResponse {
+    pub activity: Vec<ActivityEntry>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct HealthResponse {
     pub status: &'static str,
