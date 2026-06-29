@@ -34,6 +34,11 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(body || {}),
     }),
+  promote: (id, deployment_id) =>
+    req(`/api/projects/${id}/promote`, {
+      method: 'POST',
+      body: JSON.stringify({ deployment_id }),
+    }),
   listDeployments: (id) => req(`/api/projects/${id}/deployments`),
   listCommits: (id, limit = 20) =>
     req(`/api/projects/${id}/commits?limit=${limit}`),

@@ -6,6 +6,7 @@ use uuid::Uuid;
 pub struct Project {
     pub id: String,
     pub name: String,
+    pub slug: String,
     pub github_url: String,
     pub owner_repo: String,
     pub default_branch: String,
@@ -15,6 +16,7 @@ pub struct Project {
     pub output_directory: Option<String>,
     pub install_command: Option<String>,
     pub last_commit_sha: Option<String>,
+    pub production_deployment_id: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub poll_enabled: bool,
@@ -81,6 +83,11 @@ pub struct UpdateProjectRequest {
 pub struct UpsertEnvRequest {
     pub key: String,
     pub value: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PromoteRequest {
+    pub deployment_id: String,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -151,4 +158,40 @@ pub struct UpdateSettingsRequest {
 
 pub fn new_id() -> String {
     Uuid::new_v4().to_string()
+}
+
+/// Derive a URL-safe slug from a project name.
+pub fn slugify(name: &str) -> String {
+    let mut out = String::new();
+    let mut prev_dash = false;
+    for ch in name.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+            prev_dash = false;
+        } else if !prev_dash && !out.is_empty() {
+            out.push('-');
+            prev_dash = true;
+        }
+    }
+    while out.ends_with('-') {
+        out.pop();
+    }
+    if out.is_empty() {
+        "project".into()
+    } else {
+        out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::slugify;
+
+    #[test]
+    fn slugify_basic() {
+        assert_eq!(slugify("My Cool App"), "my-cool-app");
+        assert_eq!(slugify("  hello!!world  "), "hello-world");
+        assert_eq!(slugify("---"), "project");
+        assert_eq!(slugify("API_v2"), "api-v2");
+    }
 }
