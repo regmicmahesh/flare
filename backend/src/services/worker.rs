@@ -44,10 +44,40 @@ async fn run_build(state: Arc<AppState>, dep_id: &str) -> anyhow::Result<()> {
         .get_deployment(dep_id)
         .await?
         .ok_or_else(|| anyhow::anyhow!("deployment not found"))?;
+
+    // Prefer marking skipped at enqueue time and not enqueuing; still guard the worker.
+    if dep.status == "skipped" {
+        log_line(
+            &state,
+            dep_id,
+            dep.error_message
+                .as_deref()
+                .unwrap_or("Build skipped — no install/build run"),
+        )
+        .await;
+        return Ok(());
+    }
+
     let mut project = state
         .get_project(&dep.project_id)
         .await?
         .ok_or_else(|| anyhow::anyhow!("project not found"))?;
+
+    // Secondary check if changed_files became available after enqueue.
+    if let Some(msg) = crate::services::git::should_skip_build(
+        &project.root_directory,
+        dep.changed_files.as_deref(),
+    ) {
+        dep.status = "skipped".into();
+        dep.error_message = Some(msg.clone());
+        dep.finished_at = Some(Utc::now());
+        state.update_deployment(&dep).await?;
+        log_line(&state, dep_id, &msg).await;
+        project.last_commit_sha = Some(dep.commit_sha.clone());
+        project.updated_at = Utc::now();
+        state.update_project(&project).await?;
+        return Ok(());
+    }
 
     dep.status = "building".into();
     state.update_deployment(&dep).await?;

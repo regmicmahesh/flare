@@ -29,13 +29,20 @@ export const api = {
   updateProject: (id, body) =>
     req(`/api/projects/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
   deleteProject: (id) => req(`/api/projects/${id}`, { method: 'DELETE' }),
-  deploy: (id) => req(`/api/projects/${id}/deploy`, { method: 'POST' }),
+  deploy: (id, body) =>
+    req(`/api/projects/${id}/deploy`, {
+      method: 'POST',
+      body: JSON.stringify(body || {}),
+    }),
   promote: (id, deployment_id) =>
     req(`/api/projects/${id}/promote`, {
       method: 'POST',
       body: JSON.stringify({ deployment_id }),
     }),
   listDeployments: (id) => req(`/api/projects/${id}/deployments`),
+  listCommits: (id, limit = 20) =>
+    req(`/api/projects/${id}/commits?limit=${limit}`),
+  listActivity: (id) => req(`/api/projects/${id}/activity`),
   getDeployment: (id) => req(`/api/deployments/${id}`),
   getLogs: (id) => req(`/api/deployments/${id}/logs`),
   listEnv: (id) => req(`/api/projects/${id}/env`),
@@ -46,4 +53,7 @@ export const api = {
     }),
   deleteEnv: (id, key) =>
     req(`/api/projects/${id}/env/${encodeURIComponent(key)}`, { method: 'DELETE' }),
+  getSettings: () => req('/api/settings'),
+  updateSettings: (body) =>
+    req('/api/settings', { method: 'PATCH', body: JSON.stringify(body) }),
 }

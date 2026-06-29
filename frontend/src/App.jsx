@@ -15,6 +15,9 @@ function Shell({ children }) {
           <NavLink to="/new" className={({ isActive }) => (isActive ? 'active' : undefined)}>
             New Project
           </NavLink>
+          <NavLink to="/settings" className={({ isActive }) => (isActive ? 'active' : undefined)}>
+            Settings
+          </NavLink>
         </nav>
         <span className="badge">no OAuth · public GitHub only</span>
       </header>
@@ -156,23 +159,27 @@ function ProjectDetailPage() {
   const nav = useNavigate()
   const [project, setProject] = useState(null)
   const [deployments, setDeployments] = useState([])
+  const [commits, setCommits] = useState([])
   const [env, setEnv] = useState([])
   const [ek, setEk] = useState('')
   const [ev, setEv] = useState('')
   const [err, setErr] = useState('')
   const [logsFor, setLogsFor] = useState(null)
   const [logs, setLogs] = useState([])
+  const [deployingSha, setDeployingSha] = useState(null)
 
   const load = useCallback(async () => {
     try {
-      const [p, d, e] = await Promise.all([
+      const [p, d, e, c] = await Promise.all([
         api.getProject(id),
         api.listDeployments(id),
         api.listEnv(id),
+        api.listCommits(id, 20).catch(() => ({ commits: [] })),
       ])
       setProject(p)
       setDeployments(d.deployments || [])
       setEnv(e.env || [])
+      setCommits(c.commits || [])
       setErr('')
     } catch (ex) {
       setErr(ex.message)
@@ -204,12 +211,15 @@ function ProjectDetailPage() {
     }
   }, [logsFor])
 
-  async function redeploy() {
+  async function redeploy(commitSha) {
     try {
-      await api.deploy(id)
+      setDeployingSha(commitSha || 'head')
+      await api.deploy(id, commitSha ? { commit_sha: commitSha } : undefined)
       await load()
     } catch (ex) {
       setErr(ex.message)
+    } finally {
+      setDeployingSha(null)
     }
   }
 
@@ -247,11 +257,14 @@ function ProjectDetailPage() {
               {' · '}
               branch <code>{project.default_branch}</code>
               {project.framework && <> · <span className="pill">{project.framework}</span></>}
-              {project.slug && (
+{project.slug && (
                 <>
                   {' · '}
                   slug <code>{project.slug}</code>
                 </>
+              )}
+              {project.root_directory && project.root_directory !== '.' && (
+                <> · root <code>{project.root_directory}</code></>
               )}
             </p>
             {(project.slug || project.id) && (
@@ -273,9 +286,55 @@ function ProjectDetailPage() {
               </p>
             )}
             <div className="row">
-              <button className="primary" type="button" onClick={redeploy}>Deploy now</button>
+              <button
+                className="primary"
+                type="button"
+                onClick={() => redeploy()}
+                disabled={!!deployingSha}
+              >
+                {deployingSha === 'head' ? 'Deploying…' : 'Deploy now'}
+              </button>
               <button type="button" className="danger" onClick={remove}>Delete</button>
             </div>
+          </div>
+
+          <h2 style={{ fontSize: '1.1rem', marginTop: '1.5rem' }}>Recent commits</h2>
+          <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>SHA</th>
+                  <th>Message</th>
+                  <th>Author</th>
+                  <th>Date</th>
+                  <th />
+                </tr>
+              </thead>
+              <tbody>
+                {commits.map((c) => (
+                  <tr key={c.sha}>
+                    <td><code>{c.sha?.slice(0, 7)}</code></td>
+                    <td className="muted">{c.message || '—'}</td>
+                    <td className="muted">{c.author || '—'}</td>
+                    <td className="muted" style={{ whiteSpace: 'nowrap' }}>
+                      {c.date ? new Date(c.date).toLocaleString() : '—'}
+                    </td>
+                    <td>
+                      <button
+                        type="button"
+                        disabled={!!deployingSha}
+                        onClick={() => redeploy(c.sha)}
+                      >
+                        {deployingSha === c.sha ? '…' : 'Deploy'}
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+                {!commits.length && (
+                  <tr><td colSpan={5} className="muted">No commits found (is the repo cloned?)</td></tr>
+                )}
+              </tbody>
+            </table>
           </div>
 
           <h2 style={{ fontSize: '1.1rem', marginTop: '1.5rem' }}>Deployments</h2>
@@ -295,7 +354,9 @@ function ProjectDetailPage() {
                 {deployments.map((d) => (
                   <tr key={d.id}>
                     <td>
-                      <span className={`status ${statusClass(d.status)}`}>{d.status}</span>
+<span className={`status ${statusClass(d.status)}`} title={d.error_message || ''}>
+                        {d.status}
+                      </span>
                       {project.production_deployment_id === d.id && (
                         <span className="pill" style={{ marginLeft: 6 }}>production</span>
                       )}
@@ -351,6 +412,11 @@ function ProjectDetailPage() {
                 ))}
                 {!logs.length && <span className="muted">Waiting for logs…</span>}
               </div>
+              {deployments.find((d) => d.id === logsFor)?.error_message && (
+                <p className="muted" style={{ marginTop: '0.5rem' }}>
+                  {deployments.find((d) => d.id === logsFor).error_message}
+                </p>
+              )}
               {deployments.find((d) => d.id === logsFor)?.changed_files && (
                 <>
                   <h3 style={{ fontSize: '0.95rem' }}>Changed files</h3>
@@ -390,12 +456,100 @@ function ProjectDetailPage() {
   )
 }
 
+function SettingsPage() {
+  const [pollSecs, setPollSecs] = useState('60')
+  const [err, setErr] = useState('')
+  const [ok, setOk] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [loading, setLoading] = useState(true)
+
+  const load = useCallback(async () => {
+    try {
+      const data = await api.getSettings()
+      const v = data.settings?.poll_interval_secs
+      if (v != null) setPollSecs(String(v))
+      setErr('')
+    } catch (e) {
+      setErr(e.message)
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    load()
+  }, [load])
+
+  async function onSubmit(e) {
+    e.preventDefault()
+    setBusy(true)
+    setErr('')
+    setOk('')
+    const n = Number(pollSecs)
+    if (!Number.isFinite(n) || n < 5) {
+      setErr('poll_interval_secs must be a number ≥ 5')
+      setBusy(false)
+      return
+    }
+    try {
+      const data = await api.updateSettings({ poll_interval_secs: Math.floor(n) })
+      setPollSecs(String(data.settings?.poll_interval_secs ?? n))
+      setOk('Settings saved. Poller picks up the new interval on the next sleep.')
+    } catch (ex) {
+      setErr(ex.message)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Shell>
+      <div className="hero">
+        <h1>Settings</h1>
+        <p>
+          Platform configuration stored in SQLite. No OAuth or API keys — Flare only talks to
+          public GitHub over HTTPS.
+        </p>
+      </div>
+      {loading ? (
+        <p className="muted">Loading…</p>
+      ) : (
+        <form className="form card" onSubmit={onSubmit}>
+          <label>
+            Poll interval (seconds)
+            <input
+              type="number"
+              min={5}
+              step={1}
+              value={pollSecs}
+              onChange={(e) => setPollSecs(e.target.value)}
+              required
+            />
+          </label>
+          <p className="muted" style={{ margin: 0, fontSize: '0.85rem' }}>
+            How often Flare checks linked public remotes for new commits (minimum 5s). Default 60.
+          </p>
+          {err && <div className="error-box">{err}</div>}
+          {ok && <div className="ok-box">{ok}</div>}
+          <div className="row">
+            <button className="primary" type="submit" disabled={busy}>
+              {busy ? 'Saving…' : 'Save settings'}
+            </button>
+            <button type="button" onClick={load}>Reload</button>
+          </div>
+        </form>
+      )}
+    </Shell>
+  )
+}
+
 export default function App() {
   return (
     <Routes>
       <Route path="/" element={<ProjectsPage />} />
       <Route path="/new" element={<NewProjectPage />} />
       <Route path="/projects/:id" element={<ProjectDetailPage />} />
+      <Route path="/settings" element={<SettingsPage />} />
     </Routes>
   )
 }

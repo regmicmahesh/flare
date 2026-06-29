@@ -90,6 +90,40 @@ pub struct PromoteRequest {
     pub deployment_id: String,
 }
 
+#[derive(Debug, Default, Deserialize)]
+pub struct DeployRequest {
+    /// Optional commit SHA to deploy; defaults to branch HEAD.
+    pub commit_sha: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CommitEntry {
+    pub sha: String,
+    pub message: String,
+    pub author: String,
+    pub date: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CommitsResponse {
+    pub commits: Vec<CommitEntry>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ActivityEntry {
+    pub id: String,
+    pub status: String,
+    pub commit_sha: String,
+    pub commit_message: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub url_path: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ActivityResponse {
+    pub activity: Vec<ActivityEntry>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct HealthResponse {
     pub status: &'static str,
@@ -109,6 +143,17 @@ pub struct DeploymentListResponse {
 #[derive(Debug, Serialize)]
 pub struct LogsResponse {
     pub logs: Vec<BuildLog>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SettingsResponse {
+    pub settings: std::collections::HashMap<String, String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateSettingsRequest {
+    /// Poll interval for public GitHub remotes (seconds, min 5).
+    pub poll_interval_secs: Option<u64>,
 }
 
 pub fn new_id() -> String {
