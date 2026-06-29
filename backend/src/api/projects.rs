@@ -9,7 +9,8 @@ use std::sync::Arc;
 
 use crate::db::AppState;
 use crate::models::{
-    new_id, CreateProjectRequest, Deployment, Project, ProjectListResponse, UpdateProjectRequest,
+    new_id, slugify, CreateProjectRequest, Deployment, Project, ProjectListResponse,
+    PromoteRequest, UpdateProjectRequest,
 };
 use crate::services::framework::detect_framework;
 use crate::services::git::{clone_or_fetch, parse_github_input, remote_head};
@@ -24,6 +25,7 @@ pub fn routes(state: Arc<AppState>) -> Router {
                 .delete(delete_project),
         )
         .route("/api/projects/{id}/deploy", post(trigger_deploy))
+        .route("/api/projects/{id}/promote", post(promote_deployment))
         .with_state(state)
 }
 
@@ -60,6 +62,10 @@ async fn create_project(
     let name = body.name.clone().unwrap_or_else(|| parsed.repo.clone());
     let now = Utc::now();
     let id = new_id();
+    let slug = state
+        .allocate_slug(&slugify(&name), None)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     let repo_path = state.data_dir.join("repos").join(&id);
     clone_or_fetch(&parsed.clone_url, &repo_path, &branch)
@@ -77,6 +83,7 @@ async fn create_project(
     let mut project = Project {
         id: id.clone(),
         name,
+        slug,
         github_url: parsed.html_url.clone(),
         owner_repo: format!("{}/{}", parsed.owner, parsed.repo),
         default_branch: branch.clone(),
@@ -86,6 +93,7 @@ async fn create_project(
         output_directory: body.output_directory.or(fw.output_directory.clone()),
         install_command: body.install_command.or(fw.install_command.clone()),
         last_commit_sha: None,
+        production_deployment_id: None,
         created_at: now,
         updated_at: now,
         poll_enabled: true,
@@ -235,4 +243,43 @@ async fn trigger_deploy(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     state.enqueue_build(dep_id);
     Ok(Json(dep))
+}
+
+async fn promote_deployment(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(body): Json<PromoteRequest>,
+) -> Result<Json<Project>, (StatusCode, String)> {
+    let mut project = state
+        .get_project(&id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((StatusCode::NOT_FOUND, "project not found".into()))?;
+
+    let dep = state
+        .get_deployment(&body.deployment_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((StatusCode::NOT_FOUND, "deployment not found".into()))?;
+
+    if dep.project_id != id {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "deployment does not belong to this project".into(),
+        ));
+    }
+    if dep.status != "ready" {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "only ready deployments can be promoted".into(),
+        ));
+    }
+
+    project.production_deployment_id = Some(dep.id);
+    project.updated_at = Utc::now();
+    state
+        .update_project(&project)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(project))
 }

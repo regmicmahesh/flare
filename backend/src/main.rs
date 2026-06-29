@@ -8,7 +8,6 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
-use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -46,11 +45,8 @@ async fn main() -> anyhow::Result<()> {
         .allow_methods(Any)
         .allow_headers(Any);
 
-    let static_deploy = ServeDir::new(data_dir.join("deployments"));
-
     let app = Router::new()
         .merge(api::routes(state.clone()))
-        .nest_service("/_deploy", static_deploy)
         .layer(cors)
         .layer(TraceLayer::new_for_http());
 
