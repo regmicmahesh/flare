@@ -8,6 +8,8 @@ export default defineConfig({
     proxy: {
       '/api': 'http://127.0.0.1:8080',
       '/_deploy': 'http://127.0.0.1:8080',
+      '/p': 'http://127.0.0.1:8080',
+      '/s': 'http://127.0.0.1:8080',
     },
   },
 })

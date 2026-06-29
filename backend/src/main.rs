@@ -12,7 +12,6 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
-use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -50,13 +49,11 @@ async fn main() -> anyhow::Result<()> {
         .allow_methods(Any)
         .allow_headers(Any);
 
-    let static_deploy = ServeDir::new(data_dir.join("deployments"));
-
     let app = Router::new()
-        .merge(api::routes())
-        .nest_service("/_deploy", static_deploy)
+        .merge(api::api_routes())
         .fallback(domain_fallback)
-        .with_state(state)
+        .with_state(state.clone())
+        .merge(api::static_routes(state))
         .layer(cors)
         .layer(TraceLayer::new_for_http());
 
@@ -94,7 +91,16 @@ async fn domain_fallback(State(state): State<Arc<AppState>>, req: Request<Body>)
         }
     };
 
-    let dep = match state.latest_ready_deployment(&domain.project_id).await {
+    let project = match state.get_project(&domain.project_id).await {
+        Ok(Some(p)) => p,
+        Ok(None) => return (StatusCode::NOT_FOUND, "project missing").into_response(),
+        Err(e) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+        }
+    };
+
+    // Prefer production pin if set, else latest ready.
+    let dep = match state.resolve_alias_deployment(&project).await {
         Ok(Some(d)) => d,
         Ok(None) => {
             return (StatusCode::NOT_FOUND, "no ready deployment for this domain").into_response();

@@ -300,10 +300,34 @@ function ProjectDetailPage() {
               {' · '}
               branch <code>{project.default_branch}</code>
               {project.framework && <> · <span className="pill">{project.framework}</span></>}
+{project.slug && (
+                <>
+                  {' · '}
+                  slug <code>{project.slug}</code>
+                </>
+              )}
               {project.root_directory && project.root_directory !== '.' && (
                 <> · root <code>{project.root_directory}</code></>
               )}
             </p>
+            {(project.slug || project.id) && (
+              <p className="muted" style={{ marginTop: '0.35rem' }}>
+                Production:{' '}
+                <a href={`/s/${project.slug}/`} target="_blank" rel="noreferrer">
+                  /s/{project.slug}/
+                </a>
+                {' · '}
+                <a href={`/p/${project.id}/`} target="_blank" rel="noreferrer">
+                  /p/{project.id}/
+                </a>
+                {project.production_deployment_id && (
+                  <>
+                    {' · '}
+                    pinned <code>{project.production_deployment_id.slice(0, 8)}</code>
+                  </>
+                )}
+              </p>
+            )}
             <div className="row">
               <button
                 className="primary"
@@ -373,9 +397,12 @@ function ProjectDetailPage() {
                 {deployments.map((d) => (
                   <tr key={d.id}>
                     <td>
-                      <span className={`status ${statusClass(d.status)}`} title={d.error_message || ''}>
+<span className={`status ${statusClass(d.status)}`} title={d.error_message || ''}>
                         {d.status}
                       </span>
+                      {project.production_deployment_id === d.id && (
+                        <span className="pill" style={{ marginLeft: 6 }}>production</span>
+                      )}
                     </td>
                     <td><code>{d.commit_sha?.slice(0, 7)}</code></td>
                     <td className="muted">{d.commit_message || '—'}</td>
@@ -388,7 +415,7 @@ function ProjectDetailPage() {
                       ) : '—'}
                     </td>
                     <td>
-                      <div className="row" style={{ gap: '0.4rem' }}>
+<div className="row" style={{ gap: '0.4rem' }}>
                         <button type="button" onClick={() => setLogsFor(d.id)}>Logs</button>
                         {(d.status === 'queued' || d.status === 'building') && (
                           <button
@@ -398,6 +425,21 @@ function ProjectDetailPage() {
                             onClick={() => cancelDeploy(d.id)}
                           >
                             {cancelling === d.id ? '…' : 'Cancel'}
+                          </button>
+                        )}
+                        {d.status === 'ready' && project.production_deployment_id !== d.id && (
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              try {
+                                await api.promote(id, d.id)
+                                await load()
+                              } catch (ex) {
+                                setErr(ex.message)
+                              }
+                            }}
+                          >
+                            Promote
                           </button>
                         )}
                       </div>
