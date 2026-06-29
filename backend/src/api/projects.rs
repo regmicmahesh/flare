@@ -42,13 +42,27 @@ struct CommitsQuery {
     limit: Option<usize>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct ListProjectsQuery {
+    /// Case-insensitive filter on name, slug, or owner_repo.
+    q: Option<String>,
+}
+
 async fn list_projects(
     State(state): State<Arc<AppState>>,
+    Query(query): Query<ListProjectsQuery>,
 ) -> Result<Json<ProjectListResponse>, (StatusCode, String)> {
-    let projects = state
-        .list_projects()
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let projects = if let Some(q) = query.q.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        state
+            .search_projects(q)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    } else {
+        state
+            .list_projects()
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    };
     Ok(Json(ProjectListResponse { projects }))
 }
 
@@ -105,6 +119,7 @@ async fn create_project(
         build_command: body.build_command.or(fw.build_command.clone()),
         output_directory: body.output_directory.or(fw.output_directory.clone()),
         install_command: body.install_command.or(fw.install_command.clone()),
+        ignore_patterns: None,
         last_commit_sha: None,
         production_deployment_id: None,
         created_at: now,
@@ -180,6 +195,10 @@ async fn update_project(
     if let Some(i) = body.install_command {
         p.install_command = Some(i);
     }
+    if let Some(ip) = body.ignore_patterns {
+        // Empty string clears the field.
+        p.ignore_patterns = if ip.trim().is_empty() { None } else { Some(ip) };
+    }
     if let Some(pe) = body.poll_enabled {
         p.poll_enabled = pe;
     }
@@ -251,7 +270,11 @@ async fn trigger_deploy(
         None
     };
 
-    let skip_msg = should_skip_build(&project.root_directory, changed.as_deref());
+    let skip_msg = should_skip_build(
+        &project.root_directory,
+        project.ignore_patterns.as_deref(),
+        changed.as_deref(),
+    );
     let now = Utc::now();
     let dep_id = new_id();
     let dep = Deployment {

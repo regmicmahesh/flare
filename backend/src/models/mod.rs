@@ -15,6 +15,8 @@ pub struct Project {
     pub build_command: Option<String>,
     pub output_directory: Option<String>,
     pub install_command: Option<String>,
+    /// Newline-separated glob patterns (e.g. `*.md`, `docs/**`). Optional.
+    pub ignore_patterns: Option<String>,
     pub last_commit_sha: Option<String>,
     pub production_deployment_id: Option<String>,
     pub created_at: DateTime<Utc>,
@@ -76,6 +78,8 @@ pub struct UpdateProjectRequest {
     pub build_command: Option<String>,
     pub output_directory: Option<String>,
     pub install_command: Option<String>,
+    /// Newline-separated glob patterns to ignore for smart skip.
+    pub ignore_patterns: Option<String>,
     pub poll_enabled: Option<bool>,
 }
 

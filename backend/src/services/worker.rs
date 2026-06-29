@@ -78,6 +78,7 @@ async fn run_build(state: Arc<AppState>, dep_id: &str) -> anyhow::Result<()> {
     // Secondary check if changed_files became available after enqueue.
     if let Some(msg) = crate::services::git::should_skip_build(
         &project.root_directory,
+        project.ignore_patterns.as_deref(),
         dep.changed_files.as_deref(),
     ) {
         dep.status = "skipped".into();
@@ -142,10 +143,79 @@ async fn run_build(state: Arc<AppState>, dep_id: &str) -> anyhow::Result<()> {
             log_line(&state, dep_id, "Build cancelled before install").await;
             return Ok(());
         }
+
+        // Best-effort install cache: restore node_modules when package-lock.json
+        // is unchanged between the previous commit and this one.
+        let cache_nm = state
+            .data_dir
+            .join("cache")
+            .join(&project.id)
+            .join("node_modules");
+        let lock_rel = if project.root_directory == "." || project.root_directory.is_empty() {
+            "package-lock.json".to_string()
+        } else {
+            format!(
+                "{}/package-lock.json",
+                project.root_directory.trim_end_matches('/')
+            )
+        };
+        let lock_in_work = work.join("package-lock.json");
+        let mut used_cache = false;
+        if lock_in_work.exists() && cache_nm.exists() {
+            let lock_unchanged = if let Some(prev) = &project.last_commit_sha {
+                crate::services::git::path_unchanged_between(
+                    &repo,
+                    prev,
+                    &dep.commit_sha,
+                    &lock_rel,
+                )
+                .await
+            } else {
+                false
+            };
+            if lock_unchanged {
+                let dest_nm = work.join("node_modules");
+                if let Err(e) = copy_dir_all(&cache_nm, &dest_nm) {
+                    log_line(
+                        &state,
+                        dep_id,
+                        &format!("FLARE_CACHE=0 restore failed: {e}"),
+                    )
+                    .await;
+                } else {
+                    used_cache = true;
+                    log_line(
+                        &state,
+                        dep_id,
+                        "FLARE_CACHE=1 restored node_modules from project cache",
+                    )
+                    .await;
+                }
+            }
+        }
+
         log_line(&state, dep_id, &format!("$ {cmd}")).await;
         if let Err(e) = run_shell(state.clone(), dep_id, &work, &cmd, &env_vars).await {
             fail(state.clone(), &mut dep, &e.to_string()).await?;
             return Ok(());
+        }
+
+        // Persist node_modules for the next deploy when install succeeded.
+        let work_nm = work.join("node_modules");
+        if work_nm.exists() {
+            let cache_root = state.data_dir.join("cache").join(&project.id);
+            let _ = tokio::fs::create_dir_all(&cache_root).await;
+            let _ = tokio::fs::remove_dir_all(&cache_nm).await;
+            if let Err(e) = copy_dir_all(&work_nm, &cache_nm) {
+                log_line(
+                    &state,
+                    dep_id,
+                    &format!("note: could not update install cache: {e}"),
+                )
+                .await;
+            } else if !used_cache {
+                log_line(&state, dep_id, "saved node_modules to project cache").await;
+            }
         }
     }
 
@@ -323,6 +393,34 @@ fn copy_dir(src: &Path, dst: &Path) -> anyhow::Result<()> {
                 std::fs::create_dir_all(parent)?;
             }
             std::fs::copy(path, &target)?;
+        }
+    }
+    Ok(())
+}
+
+/// Copy a directory tree including `node_modules` (used for install cache).
+fn copy_dir_all(src: &Path, dst: &Path) -> anyhow::Result<()> {
+    for entry in walkdir::WalkDir::new(src) {
+        let entry = entry?;
+        let path = entry.path();
+        let rel = path.strip_prefix(src)?;
+        if rel.components().any(|c| {
+            let s = c.as_os_str().to_string_lossy();
+            s == ".git"
+        }) {
+            continue;
+        }
+        let target = dst.join(rel);
+        if entry.file_type().is_dir() {
+            std::fs::create_dir_all(&target)?;
+        } else if entry.file_type().is_file() {
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::copy(path, &target)?;
+        } else if entry.file_type().is_symlink() {
+            // Best-effort: skip broken or special symlinks in node_modules.
+            continue;
         }
     }
     Ok(())

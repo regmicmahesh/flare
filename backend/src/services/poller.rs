@@ -53,7 +53,11 @@ async fn tick(state: Arc<AppState>) -> anyhow::Result<()> {
         };
 
         let dep_id = new_id();
-        let skip_msg = should_skip_build(&project.root_directory, changed.as_deref());
+        let skip_msg = should_skip_build(
+            &project.root_directory,
+            project.ignore_patterns.as_deref(),
+            changed.as_deref(),
+        );
         let now = Utc::now();
         let mut dep = Deployment {
             id: dep_id.clone(),

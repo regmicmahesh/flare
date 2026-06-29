@@ -22,7 +22,8 @@ async function req(path, opts = {}) {
 
 export const api = {
   health: () => req('/api/health'),
-  listProjects: () => req('/api/projects'),
+  listProjects: (q) =>
+    req(q && q.trim() ? `/api/projects?q=${encodeURIComponent(q.trim())}` : '/api/projects'),
   getProject: (id) => req(`/api/projects/${id}`),
   createProject: (body) =>
     req('/api/projects', { method: 'POST', body: JSON.stringify(body) }),

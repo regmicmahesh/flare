@@ -35,10 +35,12 @@ function ProjectsPage() {
   const [projects, setProjects] = useState([])
   const [err, setErr] = useState('')
   const [loading, setLoading] = useState(true)
+  const [q, setQ] = useState('')
+  const [search, setSearch] = useState('')
 
   const load = useCallback(async () => {
     try {
-      const data = await api.listProjects()
+      const data = await api.listProjects(search)
       setProjects(data.projects || [])
       setErr('')
     } catch (e) {
@@ -46,13 +48,19 @@ function ProjectsPage() {
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [search])
 
   useEffect(() => {
     load()
     const t = setInterval(load, 8000)
     return () => clearInterval(t)
   }, [load])
+
+  // Debounce search input → query param.
+  useEffect(() => {
+    const t = setTimeout(() => setSearch(q), 250)
+    return () => clearTimeout(t)
+  }, [q])
 
   return (
     <Shell>
@@ -65,13 +73,25 @@ function ProjectsPage() {
         <div className="row">
           <Link to="/new"><button className="primary" type="button">New Project</button></Link>
           <button type="button" onClick={load}>Refresh</button>
+          <input
+            type="search"
+            placeholder="Search name, slug, or owner/repo…"
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            style={{ flex: 1, minWidth: 200, maxWidth: 360 }}
+            aria-label="Search projects"
+          />
         </div>
       </div>
       <div className="spacer" />
       {err && <div className="error-box">{err} — is the API running on :8080?</div>}
       {loading && !projects.length && <p className="muted">Loading…</p>}
       {!loading && !projects.length && !err && (
-        <p className="muted">No projects yet. Try linking <code>mdn/beginner-html-site</code>.</p>
+        <p className="muted">
+          {search
+            ? <>No projects match <code>{search}</code>.</>
+            : <>No projects yet. Try linking <code>mdn/beginner-html-site</code>.</>}
+        </p>
       )}
       <div className="grid">
         {projects.map((p) => (
@@ -172,6 +192,8 @@ function ProjectDetailPage() {
   const [logs, setLogs] = useState([])
   const [deployingSha, setDeployingSha] = useState(null)
   const [cancelling, setCancelling] = useState(null)
+  const [ignorePatterns, setIgnorePatterns] = useState('')
+  const [savingIgnore, setSavingIgnore] = useState(false)
 
   const load = useCallback(async () => {
     try {
@@ -200,6 +222,11 @@ function ProjectDetailPage() {
     const t = setInterval(load, 4000)
     return () => clearInterval(t)
   }, [load])
+
+  // Seed ignore patterns when navigating to a project (don't clobber edits on poll).
+  useEffect(() => {
+    setIgnorePatterns(project?.ignore_patterns || '')
+  }, [id, project?.id])
 
   useEffect(() => {
     if (!logsFor) return undefined
@@ -493,6 +520,57 @@ function ProjectDetailPage() {
               )}
             </>
           )}
+
+          <h2 style={{ fontSize: '1.1rem', marginTop: '1.5rem' }}>Ignore patterns</h2>
+          <p className="muted" style={{ marginTop: 0, fontSize: '0.85rem', maxWidth: '60ch' }}>
+            Newline-separated globs (e.g. <code>*.md</code>, <code>docs/**</code>). When every
+            relevant changed file matches, Flare skips the build.
+          </p>
+          <form
+            className="form"
+            style={{ maxWidth: '100%' }}
+            onSubmit={async (e) => {
+              e.preventDefault()
+              try {
+                setSavingIgnore(true)
+                const updated = await api.updateProject(id, {
+                  ignore_patterns: ignorePatterns,
+                })
+                setProject(updated)
+                setIgnorePatterns(updated.ignore_patterns || '')
+              } catch (ex) {
+                setErr(ex.message)
+              } finally {
+                setSavingIgnore(false)
+              }
+            }}
+          >
+            <label>
+              Patterns
+              <textarea
+                rows={4}
+                placeholder={'*.md\ndocs/**\n**/*.test.js'}
+                value={ignorePatterns}
+                onChange={(e) => setIgnorePatterns(e.target.value)}
+                style={{
+                  width: '100%',
+                  fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+                  fontSize: '0.85rem',
+                  background: '#0a0a12',
+                  color: 'inherit',
+                  border: '1px solid var(--border)',
+                  borderRadius: 8,
+                  padding: '0.6rem 0.75rem',
+                  resize: 'vertical',
+                }}
+              />
+            </label>
+            <div className="row">
+              <button className="primary" type="submit" disabled={savingIgnore}>
+                {savingIgnore ? 'Saving…' : 'Save ignore patterns'}
+              </button>
+            </div>
+          </form>
 
           <h2 style={{ fontSize: '1.1rem', marginTop: '1.5rem' }}>Environment variables</h2>
           <form className="row form" style={{ maxWidth: '100%' }} onSubmit={addEnv}>
