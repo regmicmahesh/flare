@@ -109,6 +109,10 @@ async fn domain_fallback(State(state): State<Arc<AppState>>, req: Request<Body>)
         }
     };
 
+    if let Some(denied) = api::static_serve::protection_denied(&project, &req) {
+        return denied;
+    }
+
     // Prefer production pin if set, else latest ready.
     let dep = match state.resolve_alias_deployment(&project).await {
         Ok(Some(d)) => d,

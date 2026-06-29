@@ -9,7 +9,8 @@ use crate::models::{BuildLog, Deployment, Domain, EnvVar, Project, Webhook};
 
 const PROJECT_COLS: &str = "id, name, slug, github_url, owner_repo, default_branch, framework,
                     root_directory, build_command, output_directory, install_command,
-                    ignore_patterns, last_commit_sha, production_deployment_id, created_at, updated_at,
+                    ignore_patterns, protect_secret, redeploy_interval_mins,
+                    last_commit_sha, production_deployment_id, created_at, updated_at,
                     poll_enabled != 0 as poll_enabled";
 
 pub struct AppState {
@@ -46,6 +47,8 @@ impl AppState {
                 output_directory TEXT,
                 install_command TEXT,
                 ignore_patterns TEXT,
+                protect_secret TEXT,
+                redeploy_interval_mins INTEGER NOT NULL DEFAULT 0,
                 last_commit_sha TEXT,
                 production_deployment_id TEXT,
                 created_at TEXT NOT NULL,
@@ -130,6 +133,8 @@ impl AppState {
             "ALTER TABLE projects ADD COLUMN slug TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE projects ADD COLUMN production_deployment_id TEXT",
             "ALTER TABLE projects ADD COLUMN ignore_patterns TEXT",
+            "ALTER TABLE projects ADD COLUMN protect_secret TEXT",
+            "ALTER TABLE projects ADD COLUMN redeploy_interval_mins INTEGER NOT NULL DEFAULT 0",
         ] {
             if let Err(e) = sqlx::query(stmt).execute(&pool).await {
                 let msg = e.to_string().to_lowercase();
@@ -312,8 +317,9 @@ impl AppState {
         sqlx::query(
             "INSERT INTO projects (id, name, slug, github_url, owner_repo, default_branch, framework,
              root_directory, build_command, output_directory, install_command, ignore_patterns,
+             protect_secret, redeploy_interval_mins,
              last_commit_sha, production_deployment_id, created_at, updated_at, poll_enabled)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&p.id)
         .bind(&p.name)
@@ -327,6 +333,8 @@ impl AppState {
         .bind(&p.output_directory)
         .bind(&p.install_command)
         .bind(&p.ignore_patterns)
+        .bind(&p.protect_secret)
+        .bind(p.redeploy_interval_mins)
         .bind(&p.last_commit_sha)
         .bind(&p.production_deployment_id)
         .bind(p.created_at)
@@ -341,6 +349,7 @@ impl AppState {
         sqlx::query(
             "UPDATE projects SET name=?, slug=?, default_branch=?, framework=?, root_directory=?,
              build_command=?, output_directory=?, install_command=?, ignore_patterns=?,
+             protect_secret=?, redeploy_interval_mins=?,
              last_commit_sha=?, production_deployment_id=?, updated_at=?, poll_enabled=? WHERE id=?",
         )
         .bind(&p.name)
@@ -352,6 +361,8 @@ impl AppState {
         .bind(&p.output_directory)
         .bind(&p.install_command)
         .bind(&p.ignore_patterns)
+        .bind(&p.protect_secret)
+        .bind(p.redeploy_interval_mins)
         .bind(&p.last_commit_sha)
         .bind(&p.production_deployment_id)
         .bind(p.updated_at)
