@@ -163,23 +163,32 @@ function ProjectDetailPage() {
   const [env, setEnv] = useState([])
   const [ek, setEk] = useState('')
   const [ev, setEv] = useState('')
+  const [webhooks, setWebhooks] = useState([])
+  const [whUrl, setWhUrl] = useState('')
+  const [domains, setDomains] = useState([])
+  const [domainHost, setDomainHost] = useState('')
   const [err, setErr] = useState('')
   const [logsFor, setLogsFor] = useState(null)
   const [logs, setLogs] = useState([])
   const [deployingSha, setDeployingSha] = useState(null)
+  const [cancelling, setCancelling] = useState(null)
 
   const load = useCallback(async () => {
     try {
-      const [p, d, e, c] = await Promise.all([
+      const [p, d, e, c, w, dom] = await Promise.all([
         api.getProject(id),
         api.listDeployments(id),
         api.listEnv(id),
         api.listCommits(id, 20).catch(() => ({ commits: [] })),
+        api.listWebhooks(id).catch(() => ({ webhooks: [] })),
+        api.listDomains(id).catch(() => ({ domains: [] })),
       ])
       setProject(p)
       setDeployments(d.deployments || [])
       setEnv(e.env || [])
       setCommits(c.commits || [])
+      setWebhooks(w.webhooks || [])
+      setDomains(dom.domains || [])
       setErr('')
     } catch (ex) {
       setErr(ex.message)
@@ -235,6 +244,40 @@ function ProjectDetailPage() {
     setEk('')
     setEv('')
     load()
+  }
+
+  async function cancelDeploy(depId) {
+    try {
+      setCancelling(depId)
+      await api.cancelDeployment(depId)
+      await load()
+    } catch (ex) {
+      setErr(ex.message)
+    } finally {
+      setCancelling(null)
+    }
+  }
+
+  async function addWebhook(e) {
+    e.preventDefault()
+    try {
+      await api.createWebhook(id, { url: whUrl.trim() })
+      setWhUrl('')
+      await load()
+    } catch (ex) {
+      setErr(ex.message)
+    }
+  }
+
+  async function addDomain(e) {
+    e.preventDefault()
+    try {
+      await api.createDomain(id, { host: domainHost.trim() })
+      setDomainHost('')
+      await load()
+    } catch (ex) {
+      setErr(ex.message)
+    }
   }
 
   if (!project && !err) {
@@ -345,7 +388,19 @@ function ProjectDetailPage() {
                       ) : '—'}
                     </td>
                     <td>
-                      <button type="button" onClick={() => setLogsFor(d.id)}>Logs</button>
+                      <div className="row" style={{ gap: '0.4rem' }}>
+                        <button type="button" onClick={() => setLogsFor(d.id)}>Logs</button>
+                        {(d.status === 'queued' || d.status === 'building') && (
+                          <button
+                            type="button"
+                            className="danger"
+                            disabled={cancelling === d.id}
+                            onClick={() => cancelDeploy(d.id)}
+                          >
+                            {cancelling === d.id ? '…' : 'Cancel'}
+                          </button>
+                        )}
+                      </div>
                     </td>
                   </tr>
                 ))}
@@ -405,6 +460,74 @@ function ProjectDetailPage() {
                 </button>
               </li>
             ))}
+          </ul>
+
+          <h2 style={{ fontSize: '1.1rem', marginTop: '1.5rem' }}>Deploy hooks (webhooks)</h2>
+          <p className="muted" style={{ marginTop: 0, fontSize: '0.85rem', maxWidth: '60ch' }}>
+            Outgoing webhooks fire on <code>deployment.queued</code>, <code>deployment.ready</code>,
+            and <code>deployment.error</code> (JSON POST, no secrets for MVP).
+          </p>
+          <form className="row form" style={{ maxWidth: '100%' }} onSubmit={addWebhook}>
+            <input
+              placeholder="https://example.com/hooks/flare"
+              value={whUrl}
+              onChange={(e) => setWhUrl(e.target.value)}
+              required
+              style={{ flex: 1, minWidth: 220 }}
+            />
+            <button className="primary" type="submit">Add webhook</button>
+          </form>
+          <ul className="muted">
+            {webhooks.map((w) => (
+              <li key={w.id}>
+                <code>{w.url}</code>{' '}
+                <span className="pill">{w.events}</span>{' '}
+                <button
+                  type="button"
+                  onClick={async () => {
+                    await api.deleteWebhook(id, w.id)
+                    load()
+                  }}
+                >
+                  remove
+                </button>
+              </li>
+            ))}
+            {!webhooks.length && <li>No webhooks yet</li>}
+          </ul>
+
+          <h2 style={{ fontSize: '1.1rem', marginTop: '1.5rem' }}>Custom domains</h2>
+          <p className="muted" style={{ marginTop: 0, fontSize: '0.85rem', maxWidth: '60ch' }}>
+            Local host → project mapping only. Point DNS or <code>/etc/hosts</code> at this Flare
+            instance; when the request <code>Host</code> matches, Flare serves the latest
+            <strong> ready</strong> deployment.
+          </p>
+          <form className="row form" style={{ maxWidth: '100%' }} onSubmit={addDomain}>
+            <input
+              placeholder="app.local or my-site.example.com"
+              value={domainHost}
+              onChange={(e) => setDomainHost(e.target.value)}
+              required
+              style={{ flex: 1, minWidth: 220 }}
+            />
+            <button className="primary" type="submit">Add domain</button>
+          </form>
+          <ul className="muted">
+            {domains.map((d) => (
+              <li key={d.id}>
+                <code>{d.host}</code>{' '}
+                <button
+                  type="button"
+                  onClick={async () => {
+                    await api.deleteDomain(id, d.id)
+                    load()
+                  }}
+                >
+                  remove
+                </button>
+              </li>
+            ))}
+            {!domains.length && <li>No custom domains yet</li>}
           </ul>
         </>
       )}

@@ -35,6 +35,9 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for components, data model, Doc
 - **Preview deployments** — unique URL per deployment under `/_deploy/<id>/`
 - **Build logs** — streaming / stored logs in the dashboard
 - **Projects dashboard** — manage projects, env vars, redeploys
+- **Deploy hooks** — outgoing webhooks on `deployment.queued` / `ready` / `error`
+- **Custom domains** — map a host to a project; serve latest ready deploy by `Host` header
+- **Build cancel** — cancel queued/building deployments (best-effort)
 - **Docker Compose** — multi-stage Rust image (with git + node) + nginx frontend
 - **Strict CI** — PR checks on `main` / `develop`
 
@@ -99,6 +102,48 @@ Open **Settings** in the UI (`/settings`) or call:
 - `PATCH /api/settings` with `{ "poll_interval_secs": 60 }`
 
 Values are stored in the SQLite `settings` table (default poll interval: 60 seconds, minimum 5).
+
+## Deploy hooks (outgoing webhooks)
+
+Per project, register URLs that receive a JSON POST when a deployment status changes:
+
+- `deployment.queued`
+- `deployment.ready`
+- `deployment.error`
+
+```http
+GET/POST /api/projects/{id}/webhooks
+DELETE   /api/projects/{id}/webhooks/{webhook_id}
+```
+
+POST body for create: `{ "url": "https://…", "events": ["deployment.ready"] }` (omit `events` for all). No signing secrets in this MVP; delivery is fire-and-forget via `reqwest`.
+
+## Custom domains (local mapping)
+
+Map a hostname to a project. When a request’s `Host` header matches, Flare serves the project’s **latest ready** deployment (same files as `/_deploy/<id>/`).
+
+```http
+GET/POST /api/projects/{id}/domains
+DELETE   /api/projects/{id}/domains/{domain_id}
+```
+
+This is **local mapping only** — Flare does not provision DNS or TLS. For real use, point DNS (or add an `/etc/hosts` entry on your machine) at the Flare API host/port, then open `http://your-host/`.
+
+Example `/etc/hosts`:
+
+```
+127.0.0.1  my-app.local
+```
+
+Then add domain `my-app.local` on the project and visit `http://my-app.local:8080/`.
+
+## Build cancel
+
+```http
+POST /api/deployments/{id}/cancel
+```
+
+Sets status to `cancelled` when the deployment is `queued` or `building`. The worker checks for cancel before heavy steps (best-effort; an in-flight shell command may still finish).
 
 ## Branches
 

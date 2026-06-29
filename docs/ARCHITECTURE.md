@@ -55,6 +55,8 @@ flowchart LR
 - **build_logs** — line-oriented build output
 - **env_vars** — project-scoped key/value pairs injected into build shells
 - **settings** — platform keys (e.g. `poll_interval_secs`)
+- **webhooks** — outgoing deploy hooks (`url`, comma-separated `events`)
+- **domains** — unique `host` → `project_id` mapping for custom-domain serving
 
 ## API surface (selected)
 
@@ -66,10 +68,13 @@ flowchart LR
 | POST | `/api/projects/{id}/deploy` | Manual deploy |
 | GET | `/api/projects/{id}/deployments` | Deployment history |
 | GET | `/api/deployments/{id}/logs` | Build logs |
+| POST | `/api/deployments/{id}/cancel` | Cancel queued/building (best-effort) |
 | GET/POST/DELETE | `/api/projects/{id}/env…` | Env vars |
+| GET/POST/DELETE | `/api/projects/{id}/webhooks…` | Outgoing deploy hooks |
+| GET/POST/DELETE | `/api/projects/{id}/domains…` | Custom domain host mapping |
 | GET/PATCH | `/api/settings` | Platform settings (SQLite) |
 
-Existing project/deployment/env routes are unchanged by the settings feature.
+Custom domains: when `Host` matches a mapped domain, the API fallback serves the latest **ready** deployment for that project (point DNS/`/etc/hosts` at Flare).
 
 ## Docker topology
 

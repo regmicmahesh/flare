@@ -95,6 +95,12 @@ async fn tick(state: Arc<AppState>) -> anyhow::Result<()> {
                 project.owner_repo
             );
         } else {
+            crate::services::webhooks::dispatch_event(
+                state.clone(),
+                project.id.clone(),
+                "deployment.queued",
+                &dep,
+            );
             state.enqueue_build(dep_id);
         }
     }

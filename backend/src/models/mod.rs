@@ -149,6 +149,49 @@ pub struct UpdateSettingsRequest {
     pub poll_interval_secs: Option<u64>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct Webhook {
+    pub id: String,
+    pub project_id: String,
+    pub url: String,
+    /// Comma-separated event names (e.g. deployment.ready,deployment.error)
+    pub events: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateWebhookRequest {
+    pub url: String,
+    /// Events to subscribe to. Defaults to all known events if omitted/empty.
+    pub events: Option<Vec<String>>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WebhookListResponse {
+    pub webhooks: Vec<Webhook>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct Domain {
+    pub id: String,
+    pub project_id: String,
+    pub host: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateDomainRequest {
+    pub host: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DomainListResponse {
+    pub domains: Vec<Domain>,
+}
+
+/// Known deploy-hook event names.
+pub const WEBHOOK_EVENTS: &[&str] = &["deployment.ready", "deployment.error", "deployment.queued"];
+
 pub fn new_id() -> String {
     Uuid::new_v4().to_string()
 }

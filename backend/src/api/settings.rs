@@ -4,10 +4,8 @@ use std::sync::Arc;
 use crate::db::AppState;
 use crate::models::{SettingsResponse, UpdateSettingsRequest};
 
-pub fn routes(state: Arc<AppState>) -> Router {
-    Router::new()
-        .route("/api/settings", get(get_settings).patch(patch_settings))
-        .with_state(state)
+pub fn routes() -> Router<Arc<AppState>> {
+    Router::new().route("/api/settings", get(get_settings).patch(patch_settings))
 }
 
 async fn get_settings(

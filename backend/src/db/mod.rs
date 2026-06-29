@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use tokio::sync::mpsc;
 
-use crate::models::{BuildLog, Deployment, EnvVar, Project};
+use crate::models::{BuildLog, Deployment, Domain, EnvVar, Project, Webhook};
 
 pub struct AppState {
     pub pool: SqlitePool,
@@ -85,8 +85,27 @@ impl AppState {
                 value TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS webhooks (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                url TEXT NOT NULL,
+                events TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS domains (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                host TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+            );
+
             CREATE INDEX IF NOT EXISTS idx_deployments_project ON deployments(project_id);
             CREATE INDEX IF NOT EXISTS idx_logs_deployment ON build_logs(deployment_id);
+            CREATE INDEX IF NOT EXISTS idx_webhooks_project ON webhooks(project_id);
+            CREATE INDEX IF NOT EXISTS idx_domains_host ON domains(host);
             "#,
         )
         .execute(&pool)
@@ -358,5 +377,96 @@ impl AppState {
 
     pub fn enqueue_build(&self, deployment_id: String) {
         let _ = self.build_tx.send(deployment_id);
+    }
+
+    // --- webhooks ---
+
+    pub async fn list_webhooks(&self, project_id: &str) -> sqlx::Result<Vec<Webhook>> {
+        sqlx::query_as::<_, Webhook>(
+            "SELECT id, project_id, url, events, created_at FROM webhooks
+             WHERE project_id = ? ORDER BY created_at DESC",
+        )
+        .bind(project_id)
+        .fetch_all(&self.pool)
+        .await
+    }
+
+    pub async fn insert_webhook(&self, w: &Webhook) -> sqlx::Result<()> {
+        sqlx::query(
+            "INSERT INTO webhooks (id, project_id, url, events, created_at)
+             VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(&w.id)
+        .bind(&w.project_id)
+        .bind(&w.url)
+        .bind(&w.events)
+        .bind(w.created_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn delete_webhook(&self, project_id: &str, webhook_id: &str) -> sqlx::Result<u64> {
+        let res = sqlx::query("DELETE FROM webhooks WHERE id = ? AND project_id = ?")
+            .bind(webhook_id)
+            .bind(project_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(res.rows_affected())
+    }
+
+    // --- domains ---
+
+    pub async fn list_domains(&self, project_id: &str) -> sqlx::Result<Vec<Domain>> {
+        sqlx::query_as::<_, Domain>(
+            "SELECT id, project_id, host, created_at FROM domains
+             WHERE project_id = ? ORDER BY created_at DESC",
+        )
+        .bind(project_id)
+        .fetch_all(&self.pool)
+        .await
+    }
+
+    pub async fn insert_domain(&self, d: &Domain) -> sqlx::Result<()> {
+        sqlx::query("INSERT INTO domains (id, project_id, host, created_at) VALUES (?, ?, ?, ?)")
+            .bind(&d.id)
+            .bind(&d.project_id)
+            .bind(&d.host)
+            .bind(d.created_at)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn get_domain_by_host(&self, host: &str) -> sqlx::Result<Option<Domain>> {
+        sqlx::query_as::<_, Domain>(
+            "SELECT id, project_id, host, created_at FROM domains WHERE host = ?",
+        )
+        .bind(host)
+        .fetch_optional(&self.pool)
+        .await
+    }
+
+    pub async fn delete_domain(&self, project_id: &str, domain_id: &str) -> sqlx::Result<u64> {
+        let res = sqlx::query("DELETE FROM domains WHERE id = ? AND project_id = ?")
+            .bind(domain_id)
+            .bind(project_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(res.rows_affected())
+    }
+
+    /// Latest ready deployment for a project (production mapping for custom domains).
+    pub async fn latest_ready_deployment(
+        &self,
+        project_id: &str,
+    ) -> sqlx::Result<Option<Deployment>> {
+        sqlx::query_as::<_, Deployment>(
+            "SELECT * FROM deployments WHERE project_id = ? AND status = 'ready'
+             ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(project_id)
+        .fetch_optional(&self.pool)
+        .await
     }
 }

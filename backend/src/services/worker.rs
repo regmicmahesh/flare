@@ -39,6 +39,13 @@ async fn log_line(state: &AppState, dep_id: &str, line: &str) {
     let _ = state.append_log(dep_id, line).await;
 }
 
+async fn is_cancelled(state: &AppState, dep_id: &str) -> bool {
+    matches!(
+        state.get_deployment(dep_id).await,
+        Ok(Some(d)) if d.status == "cancelled"
+    )
+}
+
 async fn run_build(state: Arc<AppState>, dep_id: &str) -> anyhow::Result<()> {
     let mut dep = state
         .get_deployment(dep_id)
@@ -55,6 +62,11 @@ async fn run_build(state: Arc<AppState>, dep_id: &str) -> anyhow::Result<()> {
                 .unwrap_or("Build skipped — no install/build run"),
         )
         .await;
+        return Ok(());
+    }
+
+    if dep.status == "cancelled" {
+        log_line(&state, dep_id, "Build cancelled before start").await;
         return Ok(());
     }
 
@@ -79,6 +91,11 @@ async fn run_build(state: Arc<AppState>, dep_id: &str) -> anyhow::Result<()> {
         return Ok(());
     }
 
+    if is_cancelled(&state, dep_id).await {
+        log_line(&state, dep_id, "Build cancelled before start").await;
+        return Ok(());
+    }
+
     dep.status = "building".into();
     state.update_deployment(&dep).await?;
     log_line(&state, dep_id, "Starting build…").await;
@@ -95,6 +112,11 @@ async fn run_build(state: Arc<AppState>, dep_id: &str) -> anyhow::Result<()> {
         .args(["-C", &repo.to_string_lossy(), "checkout", &dep.commit_sha])
         .status()
         .await;
+
+    if is_cancelled(&state, dep_id).await {
+        log_line(&state, dep_id, "Build cancelled after checkout").await;
+        return Ok(());
+    }
 
     let fw = detect_framework(&work);
     if project.framework.is_none() {
@@ -116,19 +138,32 @@ async fn run_build(state: Arc<AppState>, dep_id: &str) -> anyhow::Result<()> {
     let env_vars = state.list_env(&project.id).await.unwrap_or_default();
 
     if let Some(cmd) = install {
+        if is_cancelled(&state, dep_id).await {
+            log_line(&state, dep_id, "Build cancelled before install").await;
+            return Ok(());
+        }
         log_line(&state, dep_id, &format!("$ {cmd}")).await;
         if let Err(e) = run_shell(state.clone(), dep_id, &work, &cmd, &env_vars).await {
-            fail(&state, &mut dep, &e.to_string()).await?;
+            fail(state.clone(), &mut dep, &e.to_string()).await?;
             return Ok(());
         }
     }
 
     if let Some(cmd) = build {
-        log_line(&state, dep_id, &format!("$ {cmd}")).await;
-        if let Err(e) = run_shell(state.clone(), dep_id, &work, &cmd, &env_vars).await {
-            fail(&state, &mut dep, &e.to_string()).await?;
+        if is_cancelled(&state, dep_id).await {
+            log_line(&state, dep_id, "Build cancelled before build step").await;
             return Ok(());
         }
+        log_line(&state, dep_id, &format!("$ {cmd}")).await;
+        if let Err(e) = run_shell(state.clone(), dep_id, &work, &cmd, &env_vars).await {
+            fail(state.clone(), &mut dep, &e.to_string()).await?;
+            return Ok(());
+        }
+    }
+
+    if is_cancelled(&state, dep_id).await {
+        log_line(&state, dep_id, "Build cancelled before publish").await;
+        return Ok(());
     }
 
     let out_src = if output == "." {
@@ -173,6 +208,12 @@ p{{color:#888;margin:0}}</style></head><body><div class="card"><h1>Deployed with
         .await;
     }
 
+    // Final cancel check — don't overwrite cancelled status with ready.
+    if is_cancelled(&state, dep_id).await {
+        log_line(&state, dep_id, "Build cancelled before marking ready").await;
+        return Ok(());
+    }
+
     dep.status = "ready".into();
     dep.url_path = Some(format!("/_deploy/{dep_id}/"));
     dep.finished_at = Some(Utc::now());
@@ -184,19 +225,36 @@ p{{color:#888;margin:0}}</style></head><body><div class="card"><h1>Deployed with
     state.update_project(&project).await?;
 
     log_line(&state, dep_id, "Build ready ✓").await;
+    crate::services::webhooks::dispatch_event(
+        state.clone(),
+        project.id.clone(),
+        "deployment.ready",
+        &dep,
+    );
     Ok(())
 }
 
 async fn fail(
-    state: &AppState,
+    state: Arc<AppState>,
     dep: &mut crate::models::Deployment,
     err: &str,
 ) -> anyhow::Result<()> {
-    log_line(state, &dep.id, &format!("ERROR: {err}")).await;
+    // Don't overwrite a cancel with error.
+    if is_cancelled(&state, &dep.id).await {
+        log_line(&state, &dep.id, "Build cancelled (ignoring failure)").await;
+        return Ok(());
+    }
+    log_line(&state, &dep.id, &format!("ERROR: {err}")).await;
     dep.status = "error".into();
     dep.error_message = Some(err.to_string());
     dep.finished_at = Some(Utc::now());
     state.update_deployment(dep).await?;
+    crate::services::webhooks::dispatch_event(
+        state.clone(),
+        dep.project_id.clone(),
+        "deployment.error",
+        dep,
+    );
     Ok(())
 }
 

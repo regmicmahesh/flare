@@ -16,7 +16,7 @@ struct EnvList {
     env: Vec<EnvVar>,
 }
 
-pub fn routes(state: Arc<AppState>) -> Router {
+pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route(
             "/api/projects/{id}/env",
@@ -26,7 +26,6 @@ pub fn routes(state: Arc<AppState>) -> Router {
             "/api/projects/{id}/env/{key}",
             axum::routing::delete(delete_env),
         )
-        .with_state(state)
 }
 
 async fn list_env(

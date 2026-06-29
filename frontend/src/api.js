@@ -51,4 +51,22 @@ export const api = {
   getSettings: () => req('/api/settings'),
   updateSettings: (body) =>
     req('/api/settings', { method: 'PATCH', body: JSON.stringify(body) }),
+  cancelDeployment: (id) =>
+    req(`/api/deployments/${id}/cancel`, { method: 'POST' }),
+  listWebhooks: (id) => req(`/api/projects/${id}/webhooks`),
+  createWebhook: (id, body) =>
+    req(`/api/projects/${id}/webhooks`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  deleteWebhook: (id, webhookId) =>
+    req(`/api/projects/${id}/webhooks/${webhookId}`, { method: 'DELETE' }),
+  listDomains: (id) => req(`/api/projects/${id}/domains`),
+  createDomain: (id, body) =>
+    req(`/api/projects/${id}/domains`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  deleteDomain: (id, domainId) =>
+    req(`/api/projects/${id}/domains/${domainId}`, { method: 'DELETE' }),
 }

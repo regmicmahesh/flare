@@ -18,7 +18,7 @@ use crate::services::git::{
     clone_or_fetch, list_commits, parse_github_input, remote_head, should_skip_build,
 };
 
-pub fn routes(state: Arc<AppState>) -> Router {
+pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/projects", get(list_projects).post(create_project))
         .route(
@@ -30,7 +30,6 @@ pub fn routes(state: Arc<AppState>) -> Router {
         .route("/api/projects/{id}/deploy", post(trigger_deploy))
         .route("/api/projects/{id}/commits", get(list_project_commits))
         .route("/api/projects/{id}/activity", get(project_activity))
-        .with_state(state)
 }
 
 #[derive(Debug, Deserialize)]
@@ -129,6 +128,12 @@ async fn create_project(
             finished_at: None,
         };
         let _ = state.insert_deployment(&dep).await;
+        crate::services::webhooks::dispatch_event(
+            state.clone(),
+            project.id.clone(),
+            "deployment.queued",
+            &dep,
+        );
         state.enqueue_build(dep_id);
     }
 
@@ -271,6 +276,12 @@ async fn trigger_deploy(
             .append_log(&dep.id, dep.error_message.as_deref().unwrap_or("Skipped"))
             .await;
     } else {
+        crate::services::webhooks::dispatch_event(
+            state.clone(),
+            project.id.clone(),
+            "deployment.queued",
+            &dep,
+        );
         state.enqueue_build(dep_id);
     }
     Ok(Json(dep))
