@@ -15,6 +15,9 @@ function Shell({ children }) {
           <NavLink to="/new" className={({ isActive }) => (isActive ? 'active' : undefined)}>
             New Project
           </NavLink>
+          <NavLink to="/settings" className={({ isActive }) => (isActive ? 'active' : undefined)}>
+            Settings
+          </NavLink>
         </nav>
         <span className="badge">no OAuth · public GitHub only</span>
       </header>
@@ -344,12 +347,100 @@ function ProjectDetailPage() {
   )
 }
 
+function SettingsPage() {
+  const [pollSecs, setPollSecs] = useState('60')
+  const [err, setErr] = useState('')
+  const [ok, setOk] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [loading, setLoading] = useState(true)
+
+  const load = useCallback(async () => {
+    try {
+      const data = await api.getSettings()
+      const v = data.settings?.poll_interval_secs
+      if (v != null) setPollSecs(String(v))
+      setErr('')
+    } catch (e) {
+      setErr(e.message)
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    load()
+  }, [load])
+
+  async function onSubmit(e) {
+    e.preventDefault()
+    setBusy(true)
+    setErr('')
+    setOk('')
+    const n = Number(pollSecs)
+    if (!Number.isFinite(n) || n < 5) {
+      setErr('poll_interval_secs must be a number ≥ 5')
+      setBusy(false)
+      return
+    }
+    try {
+      const data = await api.updateSettings({ poll_interval_secs: Math.floor(n) })
+      setPollSecs(String(data.settings?.poll_interval_secs ?? n))
+      setOk('Settings saved. Poller picks up the new interval on the next sleep.')
+    } catch (ex) {
+      setErr(ex.message)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Shell>
+      <div className="hero">
+        <h1>Settings</h1>
+        <p>
+          Platform configuration stored in SQLite. No OAuth or API keys — Flare only talks to
+          public GitHub over HTTPS.
+        </p>
+      </div>
+      {loading ? (
+        <p className="muted">Loading…</p>
+      ) : (
+        <form className="form card" onSubmit={onSubmit}>
+          <label>
+            Poll interval (seconds)
+            <input
+              type="number"
+              min={5}
+              step={1}
+              value={pollSecs}
+              onChange={(e) => setPollSecs(e.target.value)}
+              required
+            />
+          </label>
+          <p className="muted" style={{ margin: 0, fontSize: '0.85rem' }}>
+            How often Flare checks linked public remotes for new commits (minimum 5s). Default 60.
+          </p>
+          {err && <div className="error-box">{err}</div>}
+          {ok && <div className="ok-box">{ok}</div>}
+          <div className="row">
+            <button className="primary" type="submit" disabled={busy}>
+              {busy ? 'Saving…' : 'Save settings'}
+            </button>
+            <button type="button" onClick={load}>Reload</button>
+          </div>
+        </form>
+      )}
+    </Shell>
+  )
+}
+
 export default function App() {
   return (
     <Routes>
       <Route path="/" element={<ProjectsPage />} />
       <Route path="/new" element={<NewProjectPage />} />
       <Route path="/projects/:id" element={<ProjectDetailPage />} />
+      <Route path="/settings" element={<SettingsPage />} />
     </Routes>
   )
 }

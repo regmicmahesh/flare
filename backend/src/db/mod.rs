@@ -80,9 +80,21 @@ impl AppState {
                 FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
             );
 
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+
             CREATE INDEX IF NOT EXISTS idx_deployments_project ON deployments(project_id);
             CREATE INDEX IF NOT EXISTS idx_logs_deployment ON build_logs(deployment_id);
             "#,
+        )
+        .execute(&pool)
+        .await?;
+
+        // Seed defaults if missing
+        sqlx::query(
+            "INSERT OR IGNORE INTO settings (key, value) VALUES ('poll_interval_secs', '60')",
         )
         .execute(&pool)
         .await?;
@@ -95,6 +107,49 @@ impl AppState {
             build_tx,
             build_rx: parking_lot::Mutex::new(Some(build_rx)),
         })
+    }
+
+    pub async fn get_all_settings(
+        &self,
+    ) -> sqlx::Result<std::collections::HashMap<String, String>> {
+        let rows: Vec<(String, String)> =
+            sqlx::query_as("SELECT key, value FROM settings ORDER BY key")
+                .fetch_all(&self.pool)
+                .await?;
+        Ok(rows.into_iter().collect())
+    }
+
+    pub async fn get_setting(&self, key: &str) -> sqlx::Result<Option<String>> {
+        let row: Option<(String,)> = sqlx::query_as("SELECT value FROM settings WHERE key = ?")
+            .bind(key)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.map(|r| r.0))
+    }
+
+    pub async fn set_setting(&self, key: &str, value: &str) -> sqlx::Result<()> {
+        sqlx::query(
+            "INSERT INTO settings (key, value) VALUES (?, ?)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        )
+        .bind(key)
+        .bind(value)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn poll_interval_secs(&self) -> u64 {
+        if let Ok(Some(v)) = self.get_setting("poll_interval_secs").await {
+            if let Ok(n) = v.parse::<u64>() {
+                return n.max(5);
+            }
+        }
+        std::env::var("FLARE_POLL_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(60)
+            .max(5)
     }
 
     pub async fn list_projects(&self) -> sqlx::Result<Vec<Project>> {

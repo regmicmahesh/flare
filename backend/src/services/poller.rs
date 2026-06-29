@@ -9,19 +9,15 @@ use crate::services::git::{
 };
 
 /// Poll public GitHub remotes for new commits (no webhooks / OAuth required).
+/// Interval is read from the `settings` table (`poll_interval_secs`) each loop.
 pub fn start_poller(state: Arc<AppState>) {
     tokio::spawn(async move {
-        let interval = Duration::from_secs(
-            std::env::var("FLARE_POLL_SECS")
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(60),
-        );
         loop {
             if let Err(e) = tick(state.clone()).await {
                 tracing::warn!("poller tick error: {e:#}");
             }
-            tokio::time::sleep(interval).await;
+            let secs = state.poll_interval_secs().await;
+            tokio::time::sleep(Duration::from_secs(secs)).await;
         }
     });
 }
