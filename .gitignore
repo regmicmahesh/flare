@@ -1,0 +1,25 @@
+# Rust
+backend/target/
+**/*.rs.bk
+Cargo.lock.bak
+
+# Node
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+*.log
+npm-debug.log*
+
+# Data / runtime
+data/
+.flare/
+*.db
+*.db-journal
+.env
+.env.local
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.swp
